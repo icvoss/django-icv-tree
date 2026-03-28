@@ -45,11 +45,11 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/nigelcopley/icv-django"
-Documentation = "https://github.com/nigelcopley/icv-django/tree/main/packages/icv-tree"
-Changelog = "https://github.com/nigelcopley/icv-django/tree/main/packages/icv-tree/CHANGELOG.md"
-"Issue Tracker" = "https://github.com/nigelcopley/icv-django/issues"
-"Source Code" = "https://github.com/nigelcopley/icv-django/tree/main/packages/icv-tree"
+Homepage = "https://github.com/nigelcopley/icv-oss"
+Documentation = "https://github.com/nigelcopley/icv-oss/tree/main/packages/icv-tree"
+Changelog = "https://github.com/nigelcopley/icv-oss/tree/main/packages/icv-tree/CHANGELOG.md"
+"Issue Tracker" = "https://github.com/nigelcopley/icv-oss/issues"
+"Source Code" = "https://github.com/nigelcopley/icv-oss/tree/main/packages/icv-tree"
 
 [tool.setuptools.packages.find]
 where = ["src"]
