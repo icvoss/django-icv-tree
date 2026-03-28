@@ -1,17 +1,28 @@
 # django-icv-tree
 
-Materialised-path tree structures for Django.
+[![CI](https://github.com/nigelcopley/icv-oss/actions/workflows/ci.yml/badge.svg)](https://github.com/nigelcopley/icv-oss/actions/workflows/ci.yml)
+[![PyPI version](https://img.shields.io/pypi/v/django-icv-tree.svg)](https://pypi.org/project/django-icv-tree/)
+[![Python versions](https://img.shields.io/pypi/pyversions/django-icv-tree.svg)](https://pypi.org/project/django-icv-tree/)
+[![Django versions](https://img.shields.io/pypi/djversions/django-icv-tree.svg)](https://pypi.org/project/django-icv-tree/)
+[![Licence: MIT](https://img.shields.io/badge/Licence-MIT-blue.svg)](https://github.com/nigelcopley/icv-oss/blob/main/packages/icv-tree/LICENSE)
+
+Hierarchical data in Django without the complexity. `django-icv-tree` stores
+tree structures as materialised paths — every node knows its full ancestry in a
+single indexed column, so ancestor, descendant, and sibling queries are fast
+prefix lookups rather than recursive joins or nested set bookkeeping.
 
 One abstract model, one manager, one queryset. Every traversal method returns a
 lazy `QuerySet` — no Python list coercions, no surprise N+1 queries. Configurable
 path format, async-safe, zero tenancy coupling.
 
-Replaces **django-mptt**, **django-treebeard** (materialized path), and
+Replaces **django-mptt**, **django-treebeard** (materialised path), and
 **django-polymorphic-tree** with a simpler, single-file API.
 
 ```
 pip install django-icv-tree
 ```
+
+---
 
 ## Quick start
 
@@ -55,6 +66,8 @@ cases.save()                              # path="0001/0001/0001", depth=2, orde
 Path, depth, and order are computed automatically on save — you never set them
 manually.
 
+---
+
 ## Traversal
 
 Every method returns a lazy `QuerySet` that you can filter, slice, and chain:
@@ -92,6 +105,8 @@ Category.objects.descendants_of(node).filter(is_active=True)
 Category.objects.with_tree_fields()         # annotates is_root, child_count
 ```
 
+---
+
 ## Moving nodes
 
 ```python
@@ -110,6 +125,8 @@ emitted after commit.
 
 Cycle detection prevents moving a node under its own descendant.
 
+---
+
 ## Rebuilding
 
 If paths get out of sync (bulk imports, raw SQL, migrations), rebuild from the
@@ -127,6 +144,8 @@ Options:
 
 On PostgreSQL with `ICV_TREE_ENABLE_CTE = True`, rebuild uses a recursive CTE
 for better performance on large trees.
+
+---
 
 ## Integrity checks
 
@@ -149,6 +168,8 @@ Django system checks run automatically at startup:
 
 Models can opt out with `check_tree_integrity = False` on the class.
 
+---
+
 ## Signals
 
 ```python
@@ -166,6 +187,8 @@ def on_rebuild(sender, nodes_updated, nodes_unchanged, **kwargs):
 
 Both signals fire after the transaction commits.
 
+---
+
 ## Admin
 
 ```python
@@ -181,6 +204,8 @@ class CategoryAdmin(TreeAdmin, admin.ModelAdmin):
 - Indented list display proportional to node depth
 - Read-only path, depth, and order fields
 - Drag-drop reordering endpoint (`POST <pk>/tree-move/`)
+
+---
 
 ## Template tags
 
@@ -211,6 +236,8 @@ class CategoryAdmin(TreeAdmin, admin.ModelAdmin):
 {% if node|is_ancestor_of:current_node %}active{% endif %}
 ```
 
+---
+
 ## Migration operation
 
 For optimal prefix-query performance, add a `PathIndex` in your migration:
@@ -227,6 +254,8 @@ class Migration(migrations.Migration):
 
 On PostgreSQL this creates a `text_pattern_ops` index for efficient
 `LIKE 'path/%'` queries. On other databases it creates a standard B-tree index.
+
+---
 
 ## Testing utilities
 
@@ -284,6 +313,8 @@ def test_my_tree(tree_integrity_checker):
     tree_integrity_checker(Category)
 ```
 
+---
+
 ## Settings
 
 All settings use the `ICV_TREE_*` prefix and have sensible defaults:
@@ -300,12 +331,16 @@ All settings use the `ICV_TREE_*` prefix and have sensible defaults:
 **Warning:** Changing `ICV_TREE_PATH_SEPARATOR` or `ICV_TREE_STEP_LENGTH` after
 data exists will invalidate all stored paths. Run `rebuild()` after changing.
 
+---
+
 ## Requirements
 
 - Python 3.11+
-- Django 4.2, 5.0, or 5.1
+- Django 5.1+
 
 Optional: `factory-boy` for `TreeNodeFactory`.
+
+---
 
 ## Licence
 
