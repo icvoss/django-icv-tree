@@ -46,13 +46,21 @@ def handle_pre_save(sender, instance, **kwargs) -> None:  # type: ignore[no-unty
 
         with __import__("django.db", fromlist=["transaction"]).transaction.atomic():
             parent = instance.parent
+
+            # Build scope filter so sibling counts are scoped when
+            # tree_scope_field is set (e.g. vocabulary on Term).
+            scope_filter = {}
+            scope_field = getattr(sender, "tree_scope_field", None)
+            if scope_field:
+                scope_filter[f"{scope_field}_id"] = getattr(instance, f"{scope_field}_id")
+
             if parent is not None:
                 # Count existing children to determine order.
-                order = sender.objects.filter(parent_id=parent.pk).count()
+                order = sender.objects.filter(parent_id=parent.pk, **scope_filter).count()
                 depth = parent.depth + 1
                 parent_path = parent.path
             else:
-                order = sender.objects.filter(parent__isnull=True).count()
+                order = sender.objects.filter(parent__isnull=True, **scope_filter).count()
                 depth = 0
                 parent_path = None
 
@@ -96,7 +104,12 @@ def handle_pre_save(sender, instance, **kwargs) -> None:  # type: ignore[no-unty
                     old_order = instance.order
                     _reorder_siblings_after_removal(sender, old_parent_id, old_order)
 
-                    new_order = sender.objects.filter(parent__isnull=True).count()
+                    scope_filter = {}
+                    scope_field = getattr(sender, "tree_scope_field", None)
+                    if scope_field:
+                        scope_filter[f"{scope_field}_id"] = getattr(instance, f"{scope_field}_id")
+
+                    new_order = sender.objects.filter(parent__isnull=True, **scope_filter).count()
                     new_path = _compute_new_path(None, new_order, separator, step_length)
 
                     # Update descendants.

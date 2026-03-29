@@ -20,7 +20,7 @@ def _clean_tree_testapp_tables(django_db_setup, django_db_blocker) -> None:  # t
     with django_db_blocker.unblock():
         from django.db import connection
 
-        tables = ("tree_testapp_optouttree", "tree_testapp_simpletree")
+        tables = ("tree_testapp_scopedtree", "tree_testapp_scope", "tree_testapp_optouttree", "tree_testapp_simpletree")
         is_pg = connection.vendor == "postgresql"
 
         with connection.cursor() as cursor:

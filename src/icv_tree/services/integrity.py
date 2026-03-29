@@ -71,6 +71,10 @@ def _rebuild_cte(model: type) -> dict:
     Only called when ICV_TREE_ENABLE_CTE = True and the database backend
     is PostgreSQL.
 
+    When the model defines ``tree_scope_field``, the root-level ROW_NUMBER
+    partitions by (scope_field_id, parent_id) so each scope's roots are
+    numbered independently starting from 0001.
+
     Args:
         model: A concrete TreeNode subclass.
 
@@ -84,44 +88,39 @@ def _rebuild_cte(model: type) -> dict:
     step_length = get_setting("ICV_TREE_STEP_LENGTH", 4)
     batch_size = get_setting("ICV_TREE_REBUILD_BATCH_SIZE", 1000)
 
+    scope_field = getattr(model, "tree_scope_field", None)
+
     nodes_updated = 0
     nodes_unchanged = 0
 
     with transaction.atomic():
-        # Load all nodes into memory — CTE path computed in Python after
-        # topological sort via the CTE query.
         table = model._meta.db_table
         pk_col = model._meta.pk.column
 
-        # Safety assertion: table name and primary key column come from Django's
-        # model registry (_meta.db_table, _meta.pk.column) and are NOT user
-        # input. However, we assert here as a defence-in-depth measure to
-        # guarantee these values contain only valid SQL identifier characters
-        # before they are interpolated into the query string.
         _SQL_IDENT_RE = re.compile(r"^[A-Za-z0-9_]+$")
         assert _SQL_IDENT_RE.match(table), f"Unexpected characters in db_table: {table!r}"
         assert _SQL_IDENT_RE.match(pk_col), f"Unexpected characters in pk.column: {pk_col!r}"
 
-        # Quote identifiers using the database backend's own quoting so the
-        # query is valid even if a table or column name is a reserved word.
         quoted_table = connection.ops.quote_name(table)
         quoted_pk = connection.ops.quote_name(pk_col)
 
-        # Use recursive CTE to get topologically sorted nodes with
-        # (id, parent_id, sibling_rank) where sibling_rank is the
-        # 0-based position among siblings ordered by existing order field.
-        # Identifiers are quoted with the backend's own quoting (e.g. double
-        # quotes on PostgreSQL) so the query remains valid even if a table or
-        # column name happens to be a SQL reserved word.
-        # step_length and separator are from Django settings (integers/strings),
-        # not user input, so f-string interpolation is safe here.
+        # When scoped, partition roots by scope FK column so each scope
+        # gets independent path numbering starting at 0001.
+        if scope_field:
+            scope_col = f"{scope_field}_id"
+            assert _SQL_IDENT_RE.match(scope_col), f"Unexpected characters in scope column: {scope_col!r}"
+            quoted_scope = connection.ops.quote_name(scope_col)
+            root_partition = f"PARTITION BY t.{quoted_scope}, t.parent_id"
+        else:
+            root_partition = "PARTITION BY t.parent_id"
+
         raw_sql = f"""
             WITH RECURSIVE tree AS (
                 SELECT
                     t.{quoted_pk},
                     t.parent_id,
                     ROW_NUMBER() OVER (
-                        PARTITION BY t.parent_id
+                        {root_partition}
                         ORDER BY t."order"
                     ) - 1 AS sib_order,
                     NULL::text AS parent_path,
@@ -163,16 +162,13 @@ def _rebuild_cte(model: type) -> dict:
             cursor.execute(raw_sql)
             rows = cursor.fetchall()
 
-        # rows: (pk, sib_order, computed_path, computed_depth)
         pk_to_computed: dict = {row[0]: (int(row[1]), row[2], int(row[3])) for row in rows}
 
-        # Load all nodes.
         all_nodes = list(model.objects.all())
         to_update = []
         for node in all_nodes:
             computed = pk_to_computed.get(node.pk)
             if computed is None:
-                # Orphan — skip; system check E001 handles these.
                 continue
             new_order, new_path, new_depth = computed
             if node.path != new_path or node.depth != new_depth or node.order != new_order:
@@ -204,8 +200,87 @@ def _rebuild_cte(model: type) -> dict:
     return result
 
 
+def _get_scope_value(node: TreeNode, scope_field: str | None):  # type: ignore[no-untyped-def]
+    """Return the scope FK id for a node, or None if unscoped."""
+    if scope_field is None:
+        return None
+    return getattr(node, f"{scope_field}_id")
+
+
+def _rebuild_scoped(  # noqa: C901
+    model: type,
+    roots: list,
+    parent_to_children: dict,
+    separator: str,
+    step_length: int,
+    scope_field: str | None,
+) -> tuple[list, int, int]:
+    """Run BFS rebuild over a set of roots, numbering paths from 0.
+
+    Returns (to_update, nodes_updated, nodes_unchanged).
+    """
+    nodes_updated = 0
+    nodes_unchanged = 0
+    to_update: list = []
+    computed: dict = {}
+
+    # When scoped, group roots by scope value so each scope starts at order 0.
+    if scope_field:
+        scope_to_roots: dict = {}
+        for root in roots:
+            sv = _get_scope_value(root, scope_field)
+            scope_to_roots.setdefault(sv, []).append(root)
+        ordered_roots: list[tuple] = []
+        for sv, scoped_roots in scope_to_roots.items():
+            for i, root in enumerate(scoped_roots):
+                ordered_roots.append((root, i))
+    else:
+        ordered_roots = [(root, i) for i, root in enumerate(roots)]
+
+    queue: deque = deque()
+    for root, order_idx in ordered_roots:
+        new_path = _compute_new_path(None, order_idx, separator, step_length)
+        new_depth = 0
+        new_order = order_idx
+        computed[root.pk] = (new_path, new_depth)
+        if root.path != new_path or root.depth != new_depth or root.order != new_order:
+            root.path = new_path
+            root.depth = new_depth
+            root.order = new_order
+            to_update.append(root)
+            nodes_updated += 1
+        else:
+            nodes_unchanged += 1
+        queue.append(root)
+
+    while queue:
+        parent = queue.popleft()
+        parent_path, parent_depth = computed[parent.pk]
+        children = parent_to_children.get(parent.pk, [])
+        for i, child in enumerate(children):
+            new_path = _compute_new_path(parent_path, i, separator, step_length)
+            new_depth = parent_depth + 1
+            new_order = i
+            computed[child.pk] = (new_path, new_depth)
+            if child.path != new_path or child.depth != new_depth or child.order != new_order:
+                child.path = new_path
+                child.depth = new_depth
+                child.order = new_order
+                to_update.append(child)
+                nodes_updated += 1
+            else:
+                nodes_unchanged += 1
+            queue.append(child)
+
+    return to_update, nodes_updated, nodes_unchanged
+
+
 def rebuild(model: type) -> dict:
     """Reconstruct path, depth, and order for all nodes from the parent FK.
+
+    When the model defines ``tree_scope_field``, roots are grouped by scope
+    value and path numbering restarts at 0001 for each scope. This prevents
+    cross-scope path collisions.
 
     Args:
         model: A concrete TreeNode subclass (e.g., Page).
@@ -228,65 +303,22 @@ def rebuild(model: type) -> dict:
     batch_size = get_setting("ICV_TREE_REBUILD_BATCH_SIZE", 1000)
     enable_cte = get_setting("ICV_TREE_ENABLE_CTE", False)
 
+    scope_field = getattr(model, "tree_scope_field", None)
+
     if enable_cte and _is_postgresql():
         return _rebuild_cte(model)
 
-    nodes_updated = 0
-    nodes_unchanged = 0
-    to_update = []
-
-    # Maps pk -> (computed_path, computed_depth) for parent lookup.
-    computed: dict = {}
-
     with transaction.atomic():
         # Load all nodes grouped by parent for BFS.
-        # We use an iterative BFS with a sibling counter per parent.
         parent_to_children: dict = {}
-        all_nodes_by_pk: dict = {}
-
         for node in model.objects.all().order_by("parent_id", "order"):
-            all_nodes_by_pk[node.pk] = node
             pid = node.parent_id
-            if pid not in parent_to_children:
-                parent_to_children[pid] = []
-            parent_to_children[pid].append(node)
+            parent_to_children.setdefault(pid, []).append(node)
 
-        # BFS from roots (parent_id=None).
         roots = parent_to_children.get(None, [])
-        queue: deque = deque()
-        for i, root in enumerate(roots):
-            new_path = _compute_new_path(None, i, separator, step_length)
-            new_depth = 0
-            new_order = i
-            computed[root.pk] = (new_path, new_depth)
-            if root.path != new_path or root.depth != new_depth or root.order != new_order:
-                root.path = new_path
-                root.depth = new_depth
-                root.order = new_order
-                to_update.append(root)
-                nodes_updated += 1
-            else:
-                nodes_unchanged += 1
-            queue.append(root)
-
-        while queue:
-            parent = queue.popleft()
-            parent_path, parent_depth = computed[parent.pk]
-            children = parent_to_children.get(parent.pk, [])
-            for i, child in enumerate(children):
-                new_path = _compute_new_path(parent_path, i, separator, step_length)
-                new_depth = parent_depth + 1
-                new_order = i
-                computed[child.pk] = (new_path, new_depth)
-                if child.path != new_path or child.depth != new_depth or child.order != new_order:
-                    child.path = new_path
-                    child.depth = new_depth
-                    child.order = new_order
-                    to_update.append(child)
-                    nodes_updated += 1
-                else:
-                    nodes_unchanged += 1
-                queue.append(child)
+        to_update, nodes_updated, nodes_unchanged = _rebuild_scoped(
+            model, roots, parent_to_children, separator, step_length, scope_field,
+        )
 
         # Batch update all changed nodes.
         for i in range(0, len(to_update), batch_size):

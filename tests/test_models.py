@@ -302,21 +302,39 @@ class TestTreeQuerySet:
 
 @pytest.mark.django_db
 class TestPathUniqueness:
-    """Test that the unique constraint on path is enforced."""
+    """Test path uniqueness behaviour.
 
-    def test_path_uniqueness_constraint(self, db, simple_tree_model):
-        """Saving two nodes that would produce the same path should raise IntegrityError."""
+    Since icv-tree no longer enforces ``unique=True`` on the abstract
+    ``path`` field (to support scoped trees via ``tree_scope_field``),
+    concrete models must opt in to uniqueness via their own Meta
+    constraints.  ``ScopedTree`` uses ``unique_together`` on
+    ``(scope, path)``; models without a scope field should declare their
+    own constraint if global uniqueness is desired.
+    """
+
+    def test_scoped_path_uniqueness_constraint(self, db):
+        """Duplicate paths within the same scope should raise IntegrityError."""
         from django.db import IntegrityError, transaction
 
-        root = simple_tree_model(name="root")
-        root.save()
-        root.refresh_from_db()
+        from tree_testapp.models import Scope, ScopedTree
 
-        # Manually corrupt a second node to duplicate the path.
-        dup = simple_tree_model(name="dup")
-        dup.save()
-        dup.refresh_from_db()
+        scope = Scope.objects.create(name="unique-test")
+        n1 = ScopedTree.objects.create(name="first", scope=scope)
+
+        n2 = ScopedTree.objects.create(name="second", scope=scope)
 
         with pytest.raises(IntegrityError), transaction.atomic():
-            # Force the path to collide.
-            simple_tree_model.objects.filter(pk=dup.pk).update(path=root.path)
+            ScopedTree.objects.filter(pk=n2.pk).update(path=n1.path)
+
+    def test_same_path_allowed_across_scopes(self, db):
+        """Duplicate paths in different scopes are allowed."""
+        from tree_testapp.models import Scope, ScopedTree
+
+        s1 = Scope.objects.create(name="scope-1")
+        s2 = Scope.objects.create(name="scope-2")
+        n1 = ScopedTree.objects.create(name="a", scope=s1)
+        n2 = ScopedTree.objects.create(name="b", scope=s2)
+        n1.refresh_from_db()
+        n2.refresh_from_db()
+        # Both should have path "0001" — no collision.
+        assert n1.path == n2.path == "0001"

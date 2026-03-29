@@ -218,7 +218,26 @@ class TreeNode(models.Model):
     To move a node, call node.move_to(target, position). Setting parent
     directly and calling save() will trigger the pre_save handler which
     delegates to the move_to service.
+
+    Path scoping:
+      By default, paths are globally unique within the concrete table. When
+      multiple independent trees share the same table (e.g. terms scoped by
+      vocabulary), set ``tree_scope_field`` to the FK field name that
+      partitions the table into separate trees::
+
+          class Term(TreeNode):
+              vocabulary = models.ForeignKey(...)
+              tree_scope_field = "vocabulary"
+
+      When set, path auto-assignment and rebuild() will scope sibling
+      counts and path numbering within each scope value, preventing
+      cross-scope path collisions. You must also add a composite unique
+      constraint on (scope_field, path) in your model's Meta.
     """
+
+    #: Set to the name of a FK field to scope paths independently per value.
+    #: When ``None`` (default), paths are globally unique within the table.
+    tree_scope_field: str | None = None
 
     parent = models.ForeignKey(
         "self",
@@ -234,7 +253,6 @@ class TreeNode(models.Model):
         max_length=255,
         db_index=True,
         editable=False,
-        unique=True,
         verbose_name=_("path"),
         help_text=_("Materialised path string (e.g. '0001/0002/0003'). Managed by icv-tree — do not edit directly."),
     )
