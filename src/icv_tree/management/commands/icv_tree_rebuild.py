@@ -18,6 +18,11 @@ from django.core.management.base import BaseCommand, CommandError
 class Command(BaseCommand):
     help = "Rebuild or check materialised path fields for a TreeNode model."
 
+    # Suppress system checks — this command is the *remedy* for the
+    # inconsistencies that icv_tree.E002 detects, so the check must not
+    # block execution.
+    requires_system_checks = []
+
     def add_arguments(self, parser) -> None:  # type: ignore[no-untyped-def]
         parser.add_argument(
             "--model",
