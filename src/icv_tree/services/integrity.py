@@ -180,11 +180,16 @@ def _rebuild_cte(model: type) -> dict:
             else:
                 nodes_unchanged += 1
 
-        for i in range(0, len(to_update), batch_size):
-            model.objects.bulk_update(
-                to_update[i : i + batch_size],
-                ["path", "depth", "order"],
-            )
+        if to_update:
+            # Clear paths to PK-based placeholders first to avoid
+            # transient unique constraint violations during bulk_update.
+            _clear_paths_to_placeholders(model, batch_size)
+
+            for i in range(0, len(to_update), batch_size):
+                model.objects.bulk_update(
+                    to_update[i : i + batch_size],
+                    ["path", "depth", "order"],
+                )
 
     result = {"nodes_updated": nodes_updated, "nodes_unchanged": nodes_unchanged}
 
@@ -198,6 +203,28 @@ def _rebuild_cte(model: type) -> dict:
 
     transaction.on_commit(_emit)
     return result
+
+
+def _clear_paths_to_placeholders(model: type, batch_size: int) -> None:
+    """Set all paths to unique PK-based placeholders to avoid transient collisions.
+
+    During rebuild, ``bulk_update`` writes new path values while old paths
+    still exist in the table. When a unique constraint covers the path
+    column, a new value can collide with an old value on a row that hasn't
+    been updated yet.  By first setting every path to a placeholder that
+    is guaranteed unique (derived from the PK), the subsequent real update
+    can proceed without constraint violations.
+
+    Uses a single UPDATE ... SET path = '__rebuild_' || pk || '__' so the
+    operation is fast even for large tables, and does NOT mutate in-memory
+    node objects.
+    """
+    from django.db.models import CharField, Value
+    from django.db.models.functions import Cast, Concat
+
+    model.objects.update(
+        path=Concat(Value("__rebuild_"), Cast("pk", CharField()), Value("__")),
+    )
 
 
 def _get_scope_value(node: TreeNode, scope_field: str | None):  # type: ignore[no-untyped-def]
@@ -311,7 +338,9 @@ def rebuild(model: type) -> dict:
     with transaction.atomic():
         # Load all nodes grouped by parent for BFS.
         parent_to_children: dict = {}
+        all_nodes: list = []
         for node in model.objects.all().order_by("parent_id", "order"):
+            all_nodes.append(node)
             pid = node.parent_id
             parent_to_children.setdefault(pid, []).append(node)
 
@@ -320,12 +349,17 @@ def rebuild(model: type) -> dict:
             model, roots, parent_to_children, separator, step_length, scope_field,
         )
 
-        # Batch update all changed nodes.
-        for i in range(0, len(to_update), batch_size):
-            model.objects.bulk_update(
-                to_update[i : i + batch_size],
-                ["path", "depth", "order"],
-            )
+        if to_update:
+            # Clear paths to PK-based placeholders first to avoid
+            # transient unique constraint violations during bulk_update.
+            _clear_paths_to_placeholders(model, batch_size)
+
+            # Now write the final computed paths.
+            for i in range(0, len(to_update), batch_size):
+                model.objects.bulk_update(
+                    to_update[i : i + batch_size],
+                    ["path", "depth", "order"],
+                )
 
     result = {"nodes_updated": nodes_updated, "nodes_unchanged": nodes_unchanged}
 
