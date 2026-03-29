@@ -164,7 +164,7 @@ def _rebuild_cte(model: type) -> dict:
 
         pk_to_computed: dict = {row[0]: (int(row[1]), row[2], int(row[3])) for row in rows}
 
-        all_nodes = list(model.objects.all())
+        all_nodes = list(_unfiltered_qs(model))
         to_update = []
         for node in all_nodes:
             computed = pk_to_computed.get(node.pk)
@@ -185,8 +185,9 @@ def _rebuild_cte(model: type) -> dict:
             # transient unique constraint violations during bulk_update.
             _clear_paths_to_placeholders(model, batch_size)
 
+            qs = _unfiltered_qs(model)
             for i in range(0, len(to_update), batch_size):
-                model.objects.bulk_update(
+                qs.bulk_update(
                     to_update[i : i + batch_size],
                     ["path", "depth", "order"],
                 )
@@ -203,6 +204,23 @@ def _rebuild_cte(model: type) -> dict:
 
     transaction.on_commit(_emit)
     return result
+
+
+def _unfiltered_qs(model: type):  # type: ignore[no-untyped-def]
+    """Return a QuerySet that bypasses any manager-level filters (e.g. soft-delete).
+
+    Checks for ``all_objects`` (icv-taxonomy convention) first, then falls
+    back to ``_default_manager``.  As a last resort, constructs a raw
+    QuerySet directly from the model — guaranteed unfiltered.
+    """
+    # Prefer all_objects (TreeManager on Term — no is_active filter).
+    mgr = getattr(model, "all_objects", None)
+    if mgr is not None:
+        return mgr.all()
+    # Fallback: construct a bare QuerySet (no manager filters).
+    from django.db.models import QuerySet
+
+    return QuerySet(model)
 
 
 def _clear_paths_to_placeholders(model: type, batch_size: int) -> None:
@@ -222,7 +240,7 @@ def _clear_paths_to_placeholders(model: type, batch_size: int) -> None:
     from django.db.models import CharField, Value
     from django.db.models.functions import Cast, Concat
 
-    model.objects.update(
+    _unfiltered_qs(model).update(
         path=Concat(Value("__rebuild_"), Cast("pk", CharField()), Value("__")),
     )
 
@@ -336,10 +354,13 @@ def rebuild(model: type) -> dict:
         return _rebuild_cte(model)
 
     with transaction.atomic():
+        # Use unfiltered queryset to include inactive/soft-deleted rows.
+        qs = _unfiltered_qs(model)
+
         # Load all nodes grouped by parent for BFS.
         parent_to_children: dict = {}
         all_nodes: list = []
-        for node in model.objects.all().order_by("parent_id", "order"):
+        for node in qs.order_by("parent_id", "order"):
             all_nodes.append(node)
             pid = node.parent_id
             parent_to_children.setdefault(pid, []).append(node)
@@ -350,13 +371,13 @@ def rebuild(model: type) -> dict:
         )
 
         if to_update:
-            # Clear paths to PK-based placeholders first to avoid
+            # Clear ALL paths to PK-based placeholders first to avoid
             # transient unique constraint violations during bulk_update.
             _clear_paths_to_placeholders(model, batch_size)
 
             # Now write the final computed paths.
             for i in range(0, len(to_update), batch_size):
-                model.objects.bulk_update(
+                qs.bulk_update(
                     to_update[i : i + batch_size],
                     ["path", "depth", "order"],
                 )
@@ -415,11 +436,14 @@ def _check_integrity_orm(model: type, separator: str) -> dict:
     """
     from django.db.models import Count, Subquery
 
+    # Use unfiltered queryset to include inactive/soft-deleted rows.
+    qs = _unfiltered_qs(model)
+
     # Query 1: orphans — parent_id set but parent row does not exist.
     # Uses a NOT IN subquery: the DB evaluates this as an anti-join, one pass.
-    all_pks_subquery = model.objects.values("pk")
+    all_pks_subquery = qs.values("pk")
     orphaned_nodes = list(
-        model.objects.filter(parent_id__isnull=False)
+        qs.filter(parent_id__isnull=False)
         .exclude(parent_id__in=Subquery(all_pks_subquery))
         .values_list("pk", flat=True)
     )
@@ -430,7 +454,7 @@ def _check_integrity_orm(model: type, separator: str) -> dict:
     orphaned_set = set(orphaned_nodes)
 
     nodes_qs = (
-        model.objects.filter(parent_id__isnull=False)
+        qs.filter(parent_id__isnull=False)
         .exclude(pk__in=orphaned_set)
         .select_related("parent")
         .only("pk", "path", "parent__path", "parent_id")
@@ -439,15 +463,15 @@ def _check_integrity_orm(model: type, separator: str) -> dict:
         if not node.path.startswith(node.parent.path + separator):
             path_prefix_violations.append(node.pk)
 
-    # Query 2: depth mismatches — stream lightweight tuples only.
+    # Query 3: depth mismatches — stream lightweight tuples only.
     depth_mismatches = []
-    for pk, path, depth in model.objects.values_list("pk", "path", "depth").iterator(chunk_size=5000):
+    for pk, path, depth in qs.values_list("pk", "path", "depth").iterator(chunk_size=5000):
         if depth != path.count(separator):
             depth_mismatches.append(pk)
 
-    # Query 3: duplicates — single GROUP BY.
+    # Query 4: duplicates — single GROUP BY.
     duplicate_paths = list(
-        model.objects.values("path").annotate(cnt=Count("pk")).filter(cnt__gt=1).values_list("path", flat=True)
+        qs.values("path").annotate(cnt=Count("pk")).filter(cnt__gt=1).values_list("path", flat=True)
     )
 
     return {
