@@ -143,6 +143,31 @@ class TestScopedRebuild:
 
 
 @pytest.mark.django_db
+class TestScopedIntegrity:
+    """Test that check_tree_integrity() respects tree_scope_field."""
+
+    def test_no_false_positive_duplicates_across_scopes(self, two_scopes, scoped_tree_model):
+        """Identical paths in different scopes should NOT be flagged as duplicates."""
+        s1, s2 = two_scopes
+        scoped_tree_model.objects.create(name="A-root", scope=s1)
+        scoped_tree_model.objects.create(name="B-root", scope=s2)
+
+        result = check_tree_integrity(scoped_tree_model)
+        assert result["duplicate_paths"] == []
+        assert result["total_issues"] == 0
+
+    def test_many_scopes_with_shared_paths_no_false_positives(self, scoped_tree_model, scope_model):
+        """Paths reused across many scopes (like vocabulary terms) should be clean."""
+        scopes = [scope_model.objects.create(name=f"Scope-{i}") for i in range(10)]
+        for s in scopes:
+            scoped_tree_model.objects.create(name=f"root-{s.pk}", scope=s)
+
+        result = check_tree_integrity(scoped_tree_model)
+        assert result["duplicate_paths"] == []
+        assert result["total_issues"] == 0
+
+
+@pytest.mark.django_db
 class TestUnscopedBackwardsCompatibility:
     """Ensure models without tree_scope_field continue to work as before."""
 

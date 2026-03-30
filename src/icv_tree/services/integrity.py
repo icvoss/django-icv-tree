@@ -469,9 +469,15 @@ def _check_integrity_orm(model: type, separator: str) -> dict:
         if depth != path.count(separator):
             depth_mismatches.append(pk)
 
-    # Query 4: duplicates — single GROUP BY.
+    # Query 4: duplicates — GROUP BY scoped by tree_scope_field when set.
+    scope_field = getattr(model, "tree_scope_field", None)
+    if scope_field:
+        group_fields = [f"{scope_field}_id", "path"]
+    else:
+        group_fields = ["path"]
+
     duplicate_paths = list(
-        qs.values("path").annotate(cnt=Count("pk")).filter(cnt__gt=1).values_list("path", flat=True)
+        qs.values(*group_fields).annotate(cnt=Count("pk")).filter(cnt__gt=1).values_list("path", flat=True)
     )
 
     return {
