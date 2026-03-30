@@ -315,7 +315,6 @@ class TestPathUniqueness:
     def test_scoped_path_uniqueness_constraint(self, db):
         """Duplicate paths within the same scope should raise IntegrityError."""
         from django.db import IntegrityError, transaction
-
         from tree_testapp.models import Scope, ScopedTree
 
         scope = Scope.objects.create(name="unique-test")

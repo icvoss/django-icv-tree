@@ -276,7 +276,7 @@ def _rebuild_scoped(  # noqa: C901
             sv = _get_scope_value(root, scope_field)
             scope_to_roots.setdefault(sv, []).append(root)
         ordered_roots: list[tuple] = []
-        for sv, scoped_roots in scope_to_roots.items():
+        for _sv, scoped_roots in scope_to_roots.items():
             for i, root in enumerate(scoped_roots):
                 ordered_roots.append((root, i))
     else:
@@ -471,10 +471,7 @@ def _check_integrity_orm(model: type, separator: str) -> dict:
 
     # Query 4: duplicates — GROUP BY scoped by tree_scope_field when set.
     scope_field = getattr(model, "tree_scope_field", None)
-    if scope_field:
-        group_fields = [f"{scope_field}_id", "path"]
-    else:
-        group_fields = ["path"]
+    group_fields = [f"{scope_field}_id", "path"] if scope_field else ["path"]
 
     duplicate_paths = list(
         qs.values(*group_fields).annotate(cnt=Count("pk")).filter(cnt__gt=1).values_list("path", flat=True)
