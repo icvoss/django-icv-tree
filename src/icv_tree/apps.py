@@ -16,7 +16,6 @@ class IcvTreeConfig(AppConfig):
     def ready(self) -> None:
         """Connect signal handlers and validate settings at startup."""
         from . import (
-            checks,  # noqa: F401 — registers system checks
             handlers,  # noqa: F401 — connects pre_save / post_delete handlers
         )
         from .conf import get_setting

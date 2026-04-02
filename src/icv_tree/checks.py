@@ -1,10 +1,13 @@
 """
 Django system checks for icv-tree.
 
-Registered under ``Tags.database`` so they only run when the caller opts in
-to database checks (``manage.py check --database default``).  This avoids
-blocking ``runserver`` / ``migrate`` with potentially expensive integrity
-queries on every startup.
+NOT auto-registered with the check framework — the integrity queries are too
+expensive to run on every ``runserver``, ``migrate``, or even
+``check --database``.  Instead, invoke explicitly via::
+
+    manage.py icv_tree_rebuild --check
+
+or call ``check_all_tree_models()`` directly in your own check / CI step.
 
 E001 — Warning: orphaned nodes (parent_id references missing rows)
 E002 — Error: path inconsistencies (depth mismatch, prefix violation, duplicate paths)
@@ -13,11 +16,10 @@ E002 — Error: path inconsistencies (depth mismatch, prefix violation, duplicat
 from __future__ import annotations
 
 from django.apps import apps
-from django.core.checks import Error, Tags, Warning, register
+from django.core.checks import Error, Warning
 
 
-@register(Tags.database)
-def check_all_tree_models(app_configs, databases=None, **kwargs):  # type: ignore[no-untyped-def]
+def check_all_tree_models(app_configs=None, databases=None, **kwargs):  # type: ignore[no-untyped-def]
     """Check all concrete TreeNode subclasses for tree integrity issues.
 
     Generates:
@@ -27,16 +29,12 @@ def check_all_tree_models(app_configs, databases=None, **kwargs):  # type: ignor
     Consuming models may opt out by setting ``check_tree_integrity = False``
     on the model class (BR-TREE-043).
 
-    Only runs when ``databases`` includes the alias used by the model
-    (respects Django's ``--database`` flag).
+    Not auto-registered.  Call directly or from a management command.
     """
     from .models import TreeNode
     from .services.integrity import check_tree_integrity
 
     errors: list = []
-
-    if databases is None:
-        return errors
 
     # Find all concrete (non-abstract) TreeNode subclasses that are installed.
     tree_models = [
@@ -46,10 +44,12 @@ def check_all_tree_models(app_configs, databases=None, **kwargs):  # type: ignor
     ]
 
     for model in tree_models:
-        # Respect --database: skip models whose DB alias isn't in the set.
-        db_alias = model.objects.db
-        if db_alias not in databases:
-            continue
+        # When called with databases (e.g. from the check framework),
+        # skip models whose DB alias isn't in the set.
+        if databases is not None:
+            db_alias = model.objects.db
+            if db_alias not in databases:
+                continue
 
         try:
             result = check_tree_integrity(model)
