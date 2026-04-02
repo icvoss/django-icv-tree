@@ -426,55 +426,56 @@ def check_tree_integrity(model: type) -> dict:
 
 
 def _check_integrity_orm(model: type, separator: str) -> dict:
-    """ORM-only integrity check.
+    """ORM-only integrity check using three efficient queries.
 
-    Query 1: select_related('parent') — single LEFT JOIN for orphans + prefix
-             violations, streamed in chunks to avoid loading all rows at once.
-    Query 2: values_list('pk', 'path', 'depth') — streamed depth check on
-             lightweight tuples, no full model instantiation.
-    Query 3: GROUP BY path HAVING COUNT > 1 — duplicate detection.
+    Query 1 (orphans): LEFT OUTER JOIN via ORM — finds rows whose parent_id
+        references a missing row. Uses a single anti-join subquery.
+    Query 2 (depth + prefix): Single values_list query joining parent via
+        LEFT OUTER JOIN. Streams lightweight tuples (no model instantiation)
+        and checks both depth mismatches and prefix violations in one pass.
+    Query 3 (duplicates): GROUP BY + HAVING COUNT > 1 aggregation.
     """
-    from django.db.models import Count, Subquery
+    from django.db.models import Count, F, Subquery
 
-    # Use unfiltered queryset to include inactive/soft-deleted rows.
     qs = _unfiltered_qs(model)
 
-    # Query 1: orphans — parent_id set but parent row does not exist.
-    # Uses a NOT IN subquery: the DB evaluates this as an anti-join, one pass.
+    # --- Query 1: orphans (anti-join) ---
     all_pks_subquery = qs.values("pk")
-    orphaned_nodes = list(
+    orphaned_nodes: list = list(
         qs.filter(parent_id__isnull=False)
         .exclude(parent_id__in=Subquery(all_pks_subquery))
         .values_list("pk", flat=True)
     )
-
-    # Query 2: prefix violations via select_related (ORM LEFT JOIN).
-    # Excludes orphans so the join always resolves.
-    path_prefix_violations = []
     orphaned_set = set(orphaned_nodes)
 
-    nodes_qs = (
-        qs.filter(parent_id__isnull=False)
-        .exclude(pk__in=orphaned_set)
-        .select_related("parent")
-        .only("pk", "path", "parent__path", "parent_id")
-    )
-    for node in nodes_qs.iterator(chunk_size=2000):
-        if not node.path.startswith(node.parent.path + separator):
-            path_prefix_violations.append(node.pk)
+    # --- Query 2: depth mismatches + prefix violations in one pass ---
+    # Single query with LEFT JOIN to parent via annotate(parent_path=F("parent__path")).
+    # Returns lightweight tuples: (pk, path, depth, parent_path).
+    depth_mismatches: list = []
+    path_prefix_violations: list = []
 
-    # Query 3: depth mismatches — stream lightweight tuples only.
-    depth_mismatches = []
-    for pk, path, depth in qs.values_list("pk", "path", "depth").iterator(chunk_size=5000):
+    combined_qs = (
+        qs.annotate(parent_path=F("parent__path"))
+        .values_list("pk", "path", "depth", "parent_path")
+    )
+    for pk, path, depth, parent_path in combined_qs.iterator(chunk_size=5000):
+        # Depth check: expected depth == number of separators in path.
         if depth != path.count(separator):
             depth_mismatches.append(pk)
 
-    # Query 4: duplicates — GROUP BY scoped by tree_scope_field when set.
+        # Prefix check: only for non-root, non-orphaned nodes.
+        if parent_path is not None and pk not in orphaned_set and not path.startswith(parent_path + separator):
+            path_prefix_violations.append(pk)
+
+    # --- Query 3: duplicate paths ---
     scope_field = getattr(model, "tree_scope_field", None)
     group_fields = [f"{scope_field}_id", "path"] if scope_field else ["path"]
 
-    duplicate_paths = list(
-        qs.values(*group_fields).annotate(cnt=Count("pk")).filter(cnt__gt=1).values_list("path", flat=True)
+    duplicate_paths: list = list(
+        qs.values(*group_fields)
+        .annotate(cnt=Count("pk"))
+        .filter(cnt__gt=1)
+        .values_list("path", flat=True)
     )
 
     return {

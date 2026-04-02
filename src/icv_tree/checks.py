@@ -1,8 +1,10 @@
 """
 Django system checks for icv-tree.
 
-Registered with Django's check framework to run at startup (manage.py check,
-manage.py migrate, manage.py runserver).
+Registered under ``Tags.database`` so they only run when the caller opts in
+to database checks (``manage.py check --database default``).  This avoids
+blocking ``runserver`` / ``migrate`` with potentially expensive integrity
+queries on every startup.
 
 E001 — Warning: orphaned nodes (parent_id references missing rows)
 E002 — Error: path inconsistencies (depth mismatch, prefix violation, duplicate paths)
@@ -14,8 +16,8 @@ from django.apps import apps
 from django.core.checks import Error, Tags, Warning, register
 
 
-@register(Tags.models)
-def check_all_tree_models(app_configs, **kwargs):  # type: ignore[no-untyped-def]
+@register(Tags.database)
+def check_all_tree_models(app_configs, databases=None, **kwargs):  # type: ignore[no-untyped-def]
     """Check all concrete TreeNode subclasses for tree integrity issues.
 
     Generates:
@@ -24,11 +26,17 @@ def check_all_tree_models(app_configs, **kwargs):  # type: ignore[no-untyped-def
 
     Consuming models may opt out by setting ``check_tree_integrity = False``
     on the model class (BR-TREE-043).
+
+    Only runs when ``databases`` includes the alias used by the model
+    (respects Django's ``--database`` flag).
     """
     from .models import TreeNode
     from .services.integrity import check_tree_integrity
 
-    errors = []
+    errors: list = []
+
+    if databases is None:
+        return errors
 
     # Find all concrete (non-abstract) TreeNode subclasses that are installed.
     tree_models = [
@@ -38,6 +46,11 @@ def check_all_tree_models(app_configs, **kwargs):  # type: ignore[no-untyped-def
     ]
 
     for model in tree_models:
+        # Respect --database: skip models whose DB alias isn't in the set.
+        db_alias = model.objects.db
+        if db_alias not in databases:
+            continue
+
         try:
             result = check_tree_integrity(model)
         except Exception as exc:  # noqa: BLE001

@@ -1,8 +1,16 @@
-"""Tests for Django system checks (icv_tree.E001, icv_tree.E002)."""
+"""Tests for Django system checks (icv_tree.E001, icv_tree.E002).
+
+The check is registered under ``Tags.database`` and receives ``databases``
+from the check framework.  Tests pass ``databases={"default"}`` to simulate
+``manage.py check --database default``.
+"""
 
 from __future__ import annotations
 
 import pytest
+
+# Shorthand: the databases kwarg that Tags.database checks receive.
+_DATABASES = {"default"}
 
 
 @pytest.mark.django_db
@@ -13,10 +21,16 @@ class TestSystemChecks:
         """A healthy tree should produce no system check errors."""
         from icv_tree.checks import check_all_tree_models
 
-        errors = check_all_tree_models(None)
-        # Filter to icv_tree errors only.
+        errors = check_all_tree_models(None, databases=_DATABASES)
         icv_errors = [e for e in errors if e.id and e.id.startswith("icv_tree.")]
         assert len(icv_errors) == 0
+
+    def test_skipped_when_no_databases(self, tree_nodes):
+        """Check returns nothing when databases is None (e.g. runserver)."""
+        from icv_tree.checks import check_all_tree_models
+
+        errors = check_all_tree_models(None, databases=None)
+        assert errors == []
 
     def test_e001_warns_on_orphaned_nodes(self, db, simple_tree_model, make_node):
         """System check should emit icv_tree.E001 when orphaned nodes exist."""
@@ -38,7 +52,7 @@ class TestSystemChecks:
                 [root.pk],
             )
 
-        errors = check_all_tree_models(None)
+        errors = check_all_tree_models(None, databases=_DATABASES)
         e001_errors = [e for e in errors if getattr(e, "id", None) == "icv_tree.E001"]
 
         # Clean up the orphan so PostgreSQL FK constraint check at teardown passes.
@@ -60,7 +74,7 @@ class TestSystemChecks:
         # Corrupt the path so depth doesn't match.
         simple_tree_model.objects.filter(pk=child.pk).update(depth=99)
 
-        errors = check_all_tree_models(None)
+        errors = check_all_tree_models(None, databases=_DATABASES)
         e002_errors = [e for e in errors if getattr(e, "id", None) == "icv_tree.E002"]
         assert len(e002_errors) >= 1
 
@@ -75,7 +89,7 @@ class TestSystemChecks:
         node.save()
         OptOutTree.objects.filter(pk=node.pk).update(depth=99)
 
-        errors = check_all_tree_models(None)
+        errors = check_all_tree_models(None, databases=_DATABASES)
         # No errors for OptOutTree specifically.
         opt_out_errors = [e for e in errors if getattr(e, "obj", None) is OptOutTree]
         assert len(opt_out_errors) == 0
