@@ -367,7 +367,12 @@ def rebuild(model: type) -> dict:
 
         roots = parent_to_children.get(None, [])
         to_update, nodes_updated, nodes_unchanged = _rebuild_scoped(
-            model, roots, parent_to_children, separator, step_length, scope_field,
+            model,
+            roots,
+            parent_to_children,
+            separator,
+            step_length,
+            scope_field,
         )
 
         if to_update:
@@ -454,10 +459,7 @@ def _check_integrity_orm(model: type, separator: str) -> dict:
     depth_mismatches: list = []
     path_prefix_violations: list = []
 
-    combined_qs = (
-        qs.annotate(parent_path=F("parent__path"))
-        .values_list("pk", "path", "depth", "parent_path")
-    )
+    combined_qs = qs.annotate(parent_path=F("parent__path")).values_list("pk", "path", "depth", "parent_path")
     for pk, path, depth, parent_path in combined_qs.iterator(chunk_size=5000):
         # Depth check: expected depth == number of separators in path.
         if depth != path.count(separator):
@@ -472,10 +474,7 @@ def _check_integrity_orm(model: type, separator: str) -> dict:
     group_fields = [f"{scope_field}_id", "path"] if scope_field else ["path"]
 
     duplicate_paths: list = list(
-        qs.values(*group_fields)
-        .annotate(cnt=Count("pk"))
-        .filter(cnt__gt=1)
-        .values_list("path", flat=True)
+        qs.values(*group_fields).annotate(cnt=Count("pk")).filter(cnt__gt=1).values_list("path", flat=True)
     )
 
     return {

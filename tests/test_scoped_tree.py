@@ -89,7 +89,9 @@ class TestScopedRebuild:
         # Corrupt all paths with unique values.
         for node in scoped_tree_model.objects.all():
             scoped_tree_model.objects.filter(pk=node.pk).update(
-                path=f"CORRUPT_{node.pk}", depth=99, order=99,
+                path=f"CORRUPT_{node.pk}",
+                depth=99,
+                order=99,
             )
 
         result = rebuild(scoped_tree_model)
@@ -126,7 +128,9 @@ class TestScopedRebuild:
         # Corrupt and rebuild.
         for node in scoped_tree_model.objects.all():
             scoped_tree_model.objects.filter(pk=node.pk).update(
-                path=f"CORRUPT_{node.pk}", depth=99, order=99,
+                path=f"CORRUPT_{node.pk}",
+                depth=99,
+                order=99,
             )
 
         rebuild(scoped_tree_model)
