@@ -10,8 +10,44 @@ handle_post_delete — repairs sibling order after node deletion.
 
 from __future__ import annotations
 
+import threading
+from collections.abc import Generator
+from contextlib import contextmanager
+
 from django.db.models.signals import post_delete, pre_save
 from django.dispatch import receiver
+
+# Thread-local flag used by skip_tree_signals() context manager.
+_skip_signals = threading.local()
+
+
+@contextmanager
+def skip_tree_signals() -> Generator[None, None, None]:
+    """Context manager to temporarily disable icv-tree pre_save/post_delete handlers.
+
+    Useful for bulk operations (imports, data migrations, management commands)
+    where you want to manage tree structure manually and avoid the overhead of
+    the automatic path/order computation on every individual save.
+
+    The context manager is nestable — the outer skip remains active until
+    the outermost ``with`` block exits.
+
+    Example::
+
+        from icv_tree.handlers import skip_tree_signals
+
+        with skip_tree_signals():
+            MyTreeNode.objects.bulk_create(nodes)
+            # pre_save / post_delete handlers are disabled here
+
+        # Handlers resume here
+    """
+    old = getattr(_skip_signals, "skip", False)
+    _skip_signals.skip = True
+    try:
+        yield
+    finally:
+        _skip_signals.skip = old
 
 
 def _is_tree_node_subclass(sender) -> bool:  # type: ignore[no-untyped-def]
@@ -33,6 +69,8 @@ def handle_pre_save(sender, instance, **kwargs) -> None:  # type: ignore[no-unty
       - If parent has not changed:
           Does nothing (path remains correct).
     """
+    if getattr(_skip_signals, "skip", False):
+        return
     if not _is_tree_node_subclass(sender):
         return
 
@@ -142,6 +180,8 @@ def handle_post_delete(sender, instance, **kwargs) -> None:  # type: ignore[no-u
 
     Calls _reorder_siblings_after_removal() per BR-TREE-022.
     """
+    if getattr(_skip_signals, "skip", False):
+        return
     if not _is_tree_node_subclass(sender):
         return
 
