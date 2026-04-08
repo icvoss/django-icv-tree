@@ -9,6 +9,27 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-04-08
+
+Promoted to Production/Stable.
+
+### Added
+
+- `skip_tree_signals()` context manager — temporarily disables the
+  `handle_pre_save` handler during bulk operations, eliminating 2 DB
+  queries per save when batch-creating nodes
+- 23 new tests covering admin, management commands, and template tags
+- 10 new tests for skip_tree_signals and raw SQL sibling reorder
+
+### Changed
+
+- `_shift_subtree_up()` / `_shift_subtree_down()` now load all affected
+  descendants in a single batch query using `Q` objects instead of N+1
+  per-sibling queries. `move_to()` with 50 siblings: ~216 → ~10 queries.
+- `_reorder_siblings_after_removal()` replaced with a single raw SQL
+  `UPDATE SET "order" = "order" - 1` instead of loading into Python and
+  calling `bulk_update()`.
+
 ## [0.1.5] — 2026-04-02
 
 ### Fixed

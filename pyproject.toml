@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "django-icv-tree"
-version = "0.1.5"
+version = "0.2.0"
 description = "Materialised path tree structures for Django — configurable path format, queryset returns, async-safe, no tenancy coupling."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
 authors = [{name = "Nigel Copley"}]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Framework :: Django",
     "Framework :: Django :: 5.0",
     "Framework :: Django :: 5.1",
