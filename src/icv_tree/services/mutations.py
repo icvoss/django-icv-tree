@@ -21,6 +21,7 @@ import uuid
 from typing import TYPE_CHECKING
 
 from django.db import transaction
+from django.db.models import Q
 
 from ..exceptions import TreeStructureError
 
@@ -93,6 +94,7 @@ def _reorder_siblings_after_removal(
     model: type,
     parent_id,
     removed_order: int,
+    scope_filter: dict | None = None,
 ) -> int:
     """Decrement order values for all siblings after the removed position.
 
@@ -101,26 +103,51 @@ def _reorder_siblings_after_removal(
     This is intentional: deletion only needs to close the order gap, not
     recompute all paths, which could be expensive for large trees.
 
+    Uses a single raw SQL UPDATE for efficiency, avoiding the Python round-trip
+    of loading rows, mutating them, and calling bulk_update.
+
     Args:
         model: The concrete TreeNode subclass.
         parent_id: The parent's PK (or None for roots).
         removed_order: The order value of the removed node.
+        scope_filter: Optional dict of extra WHERE conditions used by scoped
+            trees (e.g. ``{"vocabulary_id": 5}``).  Keys must be valid column
+            names on the model's table.
 
     Returns:
-        Count of sibling nodes updated.
+        Count of sibling rows updated.
     """
-    siblings_after = list(
-        model.objects.filter(
-            parent_id=parent_id,
-            order__gt=removed_order,
-        ).order_by("order")
+    from django.db import connection
+
+    table = model._meta.db_table
+
+    # Build a parameterised WHERE clause.  Column names are double-quoted
+    # (ANSI SQL) to avoid reserved-word clashes; "order" is reserved on most
+    # SQL engines.
+    if parent_id is None:
+        parent_clause = '"parent_id" IS NULL'
+        params: list = [removed_order]
+    else:
+        parent_clause = '"parent_id" = %s'
+        params = [parent_id, removed_order]
+
+    scope_clauses: list[str] = []
+    if scope_filter:
+        for col, val in scope_filter.items():
+            scope_clauses.append(f'"{col}" = %s')
+            params.append(val)
+
+    extra_where = (" AND " + " AND ".join(scope_clauses)) if scope_clauses else ""
+
+    sql = (
+        f'UPDATE "{table}" '  # noqa: S608
+        f'SET "order" = "order" - 1 '
+        f'WHERE {parent_clause} AND "order" > %s{extra_where}'
     )
-    if not siblings_after:
-        return 0
-    for sib in siblings_after:
-        sib.order -= 1
-    model.objects.bulk_update(siblings_after, ["order"])
-    return len(siblings_after)
+
+    with connection.cursor() as cursor:
+        cursor.execute(sql, params)
+        return cursor.rowcount
 
 
 def _shift_subtree_up(
@@ -138,12 +165,15 @@ def _shift_subtree_up(
 
     Used when closing a gap (shifting siblings down: order decreases).
     """
-    # Collect nodes and all their descendants.
+    # Collect nodes and all their descendants in a single batch query.
     all_nodes = list(nodes)
-    for node in nodes:
-        all_nodes.extend(model.objects.filter(path__startswith=node.path + separator).order_by("path"))
+    if nodes:
+        q = Q()
+        for node in nodes:
+            q |= Q(path__startswith=node.path + separator)
+        all_nodes.extend(model.objects.filter(q).order_by("path"))
 
-    # Deduplicate.
+    # Deduplicate (nodes list may overlap with descendants if called with mixed input).
     seen: set = set()
     deduped = []
     for n in all_nodes:
@@ -177,9 +207,13 @@ def _shift_subtree_down(
 
     Used when making room (shifting siblings up: order increases).
     """
+    # Collect nodes and all their descendants in a single batch query.
     all_nodes = list(nodes)
-    for node in nodes:
-        all_nodes.extend(model.objects.filter(path__startswith=node.path + separator).order_by("path"))
+    if nodes:
+        q = Q()
+        for node in nodes:
+            q |= Q(path__startswith=node.path + separator)
+        all_nodes.extend(model.objects.filter(q).order_by("path"))
 
     seen: set = set()
     deduped = []
@@ -317,16 +351,33 @@ def move_to(
         for sib in source_siblings_after:
             sib.order -= 1
         # Update paths of source siblings and their subtrees (ascending order).
+        # Compute old/new paths for each sibling before touching the DB.
         source_parent_path = node.parent.path if old_parent_id is not None else None
+        sib_path_map: list[tuple] = []  # (sib, old_sib_path, new_sib_path)
         for sib in source_siblings_after:
             old_sib_path = _compute_new_path(source_parent_path, sib.order + 1, separator, step_length)
             new_sib_path = _compute_new_path(source_parent_path, sib.order, separator, step_length)
-            # Update this sibling's subtree (ascending = move to lower step = safe).
-            sib_desc = list(
-                node.__class__.objects.filter(
-                    path__startswith=old_sib_path + separator,
-                ).order_by("path")
-            )
+            sib_path_map.append((sib, old_sib_path, new_sib_path))
+
+        # Batch-fetch all descendants of all source siblings in one query.
+        if sib_path_map:
+            q = Q()
+            for _sib, old_sib_path, _new in sib_path_map:
+                q |= Q(path__startswith=old_sib_path + separator)
+            all_sib_descendants = list(node.__class__.objects.filter(q).order_by("path"))
+        else:
+            all_sib_descendants = []
+
+        # Group descendants by which sibling they belong to.
+        sib_desc_map: dict = {old_sib_path: [] for _sib, old_sib_path, _new in sib_path_map}
+        for desc in all_sib_descendants:
+            for _sib, old_sib_path, _new in sib_path_map:
+                if desc.path.startswith(old_sib_path + separator):
+                    sib_desc_map[old_sib_path].append(desc)
+                    break
+
+        for sib, old_sib_path, new_sib_path in sib_path_map:
+            sib_desc = sib_desc_map[old_sib_path]
             # Update sibling itself.
             sib.path = new_sib_path
             node.__class__.objects.filter(pk=sib.pk).update(path=new_sib_path, depth=sib.depth, order=sib.order)
@@ -349,15 +400,32 @@ def move_to(
         for sib in dest_siblings_at_or_after:
             sib.order += 1
         # Update paths of destination siblings and their subtrees.
+        # Compute old/new paths for each sibling before touching the DB.
+        dest_sib_path_map: list[tuple] = []  # (sib, old_sib_path, new_sib_path)
         for sib in dest_siblings_at_or_after:
             old_sib_path = _compute_new_path(new_parent_path, sib.order - 1, separator, step_length)
             new_sib_path = _compute_new_path(new_parent_path, sib.order, separator, step_length)
-            # Update subtree of this sibling.
-            sib_desc = list(
-                node.__class__.objects.filter(
-                    path__startswith=old_sib_path + separator,
-                ).order_by("-path")  # descending within subtree too
-            )
+            dest_sib_path_map.append((sib, old_sib_path, new_sib_path))
+
+        # Batch-fetch all descendants of all destination siblings in one query.
+        if dest_sib_path_map:
+            q = Q()
+            for _sib, old_sib_path, _new in dest_sib_path_map:
+                q |= Q(path__startswith=old_sib_path + separator)
+            all_dest_sib_descendants = list(node.__class__.objects.filter(q).order_by("-path"))
+        else:
+            all_dest_sib_descendants = []
+
+        # Group descendants by which sibling they belong to.
+        dest_sib_desc_map: dict = {old_sib_path: [] for _sib, old_sib_path, _new in dest_sib_path_map}
+        for desc in all_dest_sib_descendants:
+            for _sib, old_sib_path, _new in dest_sib_path_map:
+                if desc.path.startswith(old_sib_path + separator):
+                    dest_sib_desc_map[old_sib_path].append(desc)
+                    break
+
+        for sib, old_sib_path, new_sib_path in dest_sib_path_map:
+            sib_desc = dest_sib_desc_map[old_sib_path]
             # Update sibling itself (highest order first = descending).
             sib.path = new_sib_path
             node.__class__.objects.filter(pk=sib.pk).update(path=new_sib_path, depth=sib.depth, order=sib.order)

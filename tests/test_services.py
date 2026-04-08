@@ -377,3 +377,91 @@ class TestSiblingReorderAfterDeletion:
         grandchild1 = tree_nodes["grandchild1"]
         grandchild1.delete()
         mock_rebuild.assert_not_called()
+
+
+@pytest.mark.django_db
+class TestMoveToManySiblings:
+    """Verify move_to works correctly when there are many siblings.
+
+    This exercises the batch Q-query optimisation introduced to replace the
+    per-sibling descendant query pattern.  Creating 20+ siblings ensures the
+    batch path covers the multi-sibling code path.
+    """
+
+    SIBLING_COUNT = 22  # > 20 as specified
+
+    def test_move_to_first_child_with_many_siblings(self, db, make_node, simple_tree_model):
+        """Moving a node to first-child when the parent has many children shifts all correctly."""
+        from icv_tree.services import check_tree_integrity
+
+        parent = make_node("parent")
+        # Create SIBLING_COUNT children under parent.
+        siblings = [make_node(f"child_{i:02d}", parent=parent) for i in range(self.SIBLING_COUNT)]
+
+        # Move an external root node to be the first child of parent.
+        new_node = make_node("incoming")
+        new_node.move_to(parent, "first-child")
+        new_node.refresh_from_db()
+
+        assert new_node.order == 0
+        assert new_node.path.startswith(parent.path + "/")
+
+        # All original siblings must have been bumped up by 1.
+        for i, sib in enumerate(siblings):
+            sib.refresh_from_db()
+            assert sib.order == i + 1, f"sibling {i} expected order {i + 1}, got {sib.order}"
+
+        # Tree integrity must be clean.
+        result = check_tree_integrity(simple_tree_model)
+        assert result["total_issues"] == 0
+
+    def test_move_to_left_with_many_siblings(self, db, make_node, simple_tree_model):
+        """Moving a node left of the middle sibling when there are many siblings."""
+        from icv_tree.services import check_tree_integrity
+
+        parent = make_node("parent")
+        siblings = [make_node(f"child_{i:02d}", parent=parent) for i in range(self.SIBLING_COUNT)]
+
+        # Target the middle sibling.
+        mid = self.SIBLING_COUNT // 2
+        target = siblings[mid]
+
+        # Move last sibling to the left of the middle one.
+        mover = siblings[-1]
+        expected_new_order = target.order  # mover will land at target's current order
+        mover.move_to(target, "left")
+        mover.refresh_from_db()
+
+        assert mover.order == expected_new_order
+
+        # Tree integrity must be clean.
+        result = check_tree_integrity(simple_tree_model)
+        assert result["total_issues"] == 0
+
+    def test_move_to_right_with_many_siblings_and_descendants(self, db, make_node, simple_tree_model):
+        """Moving a node right of the first sibling with each sibling having descendants."""
+        from icv_tree.services import check_tree_integrity
+
+        parent = make_node("parent")
+        siblings = [make_node(f"child_{i:02d}", parent=parent) for i in range(self.SIBLING_COUNT)]
+        # Add one grandchild under each sibling so descendants exist.
+        for sib in siblings:
+            make_node(f"grandchild_of_{sib.name}", parent=sib)
+
+        # Move the last sibling to the right of the first.
+        mover = siblings[-1]
+        mover.move_to(siblings[0], "right")
+        mover.refresh_from_db()
+
+        assert mover.order == 1  # immediately after siblings[0] which is order=0
+
+        # All grandchildren must still be under their parent.
+        for sib in siblings[:-1]:  # exclude mover itself (it moved)
+            sib.refresh_from_db()
+            children = list(simple_tree_model.objects.filter(parent_id=sib.pk))
+            assert len(children) == 1, f"{sib.name} should still have 1 child"
+            assert children[0].path.startswith(sib.path + "/")
+
+        # Tree integrity must be clean.
+        result = check_tree_integrity(simple_tree_model)
+        assert result["total_issues"] == 0
