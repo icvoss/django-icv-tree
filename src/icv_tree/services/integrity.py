@@ -195,7 +195,6 @@ def _rebuild_cte(model: type) -> dict:
     result = {"nodes_updated": nodes_updated, "nodes_unchanged": nodes_unchanged}
 
     def _emit():  # type: ignore[no-untyped-def]
-
         tree_rebuilt.send(
             sender=model,
             nodes_updated=nodes_updated,
