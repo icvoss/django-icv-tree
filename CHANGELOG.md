@@ -9,6 +9,17 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Fixed
+
+- **Tree traversal across multi-table-inheritance subtypes.** When a `TreeNode`
+  subclass is the base of an MTI chain (e.g. a `Page` base with `RegularPage` /
+  `RedirectPage` children), traversal methods queried the concrete subclass's
+  manager and missed ancestors or descendants stored as a sibling subtype.
+  `get_ancestors`, `get_descendants`, `get_children`, `get_siblings`,
+  `get_root`, `is_leaf`, and `get_descendant_count` now scope to the tree's
+  base model via the new `TreeNode._tree_model()` / `_tree_objects()` helpers.
+  Non-inherited models are unaffected (the helpers resolve to the model itself).
+
 ## [0.2.0] — 2026-04-08
 
 Promoted to Production/Stable.

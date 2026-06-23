@@ -278,6 +278,63 @@ class TreeNode(models.Model):
         ordering = ["path"]
 
     # ------------------------------------------------------------------
+    # Multi-table inheritance support
+    # ------------------------------------------------------------------
+    #
+    # When a TreeNode subclass is itself the parent of a multi-table
+    # inheritance chain (e.g. ``Page`` ← ``RegularPage`` /
+    # ``InternalRedirectPage`` under django-polymorphic), every tree-walking
+    # query must scope to the BASE table, not the concrete subclass. Otherwise
+    # ``self.__class__.objects.filter(path__in=…)`` for a ``RegularPage``
+    # misses ancestors stored as ``InternalRedirectPage`` rows.
+    #
+    # ``_tree_model()`` returns the topmost concrete ancestor that still
+    # inherits TreeNode. For non-inherited models this is ``cls`` itself, so
+    # behaviour is unchanged for the simple case. Result is cached on the
+    # class on first call.
+
+    @classmethod
+    def _tree_model(cls) -> type[TreeNode]:
+        """Return the topmost concrete TreeNode ancestor in the MRO.
+
+        For models that don't use multi-table inheritance this is ``cls``
+        itself. For child models in a multi-table chain (django-polymorphic
+        and plain Django MTI), this walks ``_meta.parents`` to find the
+        topmost concrete TreeNode and caches the result.
+
+        All tree-walking queries route through this model's manager so that
+        sibling counts, ancestor lookups, and descendant scans see every row
+        regardless of the concrete subtype that wrote it.
+        """
+        cached = cls.__dict__.get("_tree_model_cache")
+        if cached is not None:
+            return cached
+
+        result: type[TreeNode] = cls
+        parents = cls._meta.parents  # OrderedDict of {parent_model: parent_link_field}
+        for parent_model in parents:
+            if (
+                isinstance(parent_model, type)
+                and issubclass(parent_model, TreeNode)
+                and not parent_model._meta.abstract
+            ):
+                # Recurse — parent itself may be a child of a higher TreeNode.
+                result = parent_model._tree_model()
+                break
+
+        # Cache on the class (only on cls, not propagated to subclasses).
+        cls._tree_model_cache = result
+        return result
+
+    @classmethod
+    def _tree_objects(cls):
+        """Return the manager for the model that owns this tree's rows.
+
+        Shorthand for ``cls._tree_model()._default_manager``.
+        """
+        return cls._tree_model()._default_manager
+
+    # ------------------------------------------------------------------
     # Traversal instance methods
     # ------------------------------------------------------------------
 
@@ -288,18 +345,21 @@ class TreeNode(models.Model):
             include_self: If True, include this node as the last result.
 
         Returns:
-            QuerySet of the same concrete model type, ordered by depth ascending.
+            QuerySet over the tree's base model, ordered by depth ascending. For
+            multi-table-inheritance trees this scopes to the base table so
+            ancestors stored as sibling subtypes are still found.
         """
         from .conf import get_setting
 
+        manager = self._tree_objects()
         separator = get_setting("ICV_TREE_PATH_SEPARATOR", "/")
         parts = self.path.split(separator)
         ancestor_paths = [separator.join(parts[: i + 1]) for i in range(len(parts) - 1)]
         if include_self:
             ancestor_paths.append(self.path)
         if not ancestor_paths:
-            return self.__class__.objects.none()
-        return self.__class__.objects.filter(path__in=ancestor_paths).order_by("depth")
+            return manager.none()
+        return manager.filter(path__in=ancestor_paths).order_by("depth")
 
     def get_descendants(self, include_self: bool = False) -> models.QuerySet:
         """Return a QuerySet of all descendant nodes, ordered depth-first.
@@ -308,23 +368,26 @@ class TreeNode(models.Model):
             include_self: If True, include this node as the first result.
 
         Returns:
-            QuerySet of the same concrete model type, ordered by path.
+            QuerySet over the tree's base model, ordered by path. For
+            multi-table-inheritance trees this scopes to the base table so
+            descendants of any subtype are found.
         """
         from .conf import get_setting
 
+        manager = self._tree_objects()
         separator = get_setting("ICV_TREE_PATH_SEPARATOR", "/")
-        qs = self.__class__.objects.filter(path__startswith=self.path + separator)
+        qs = manager.filter(path__startswith=self.path + separator)
         if include_self:
-            qs = qs | self.__class__.objects.filter(pk=self.pk)
+            qs = qs | manager.filter(pk=self.pk)
         return qs.order_by("path")
 
     def get_children(self) -> models.QuerySet:
         """Return a QuerySet of direct children, ordered by order field.
 
         Returns:
-            QuerySet of the same concrete model type, ordered by order ascending.
+            QuerySet over the tree's base model, ordered by order ascending.
         """
-        return self.__class__.objects.filter(parent=self).order_by("order")
+        return self._tree_objects().filter(parent=self).order_by("order")
 
     def get_siblings(self, include_self: bool = False) -> models.QuerySet:
         """Return a QuerySet of sibling nodes (same parent).
@@ -333,9 +396,9 @@ class TreeNode(models.Model):
             include_self: If True, include this node in the result.
 
         Returns:
-            QuerySet of the same concrete model type, ordered by order ascending.
+            QuerySet over the tree's base model, ordered by order ascending.
         """
-        qs = self.__class__.objects.filter(parent_id=self.parent_id)
+        qs = self._tree_objects().filter(parent_id=self.parent_id)
         if not include_self:
             qs = qs.exclude(pk=self.pk)
         return qs.order_by("order")
@@ -355,7 +418,7 @@ class TreeNode(models.Model):
 
         separator = get_setting("ICV_TREE_PATH_SEPARATOR", "/")
         root_path = self.path.split(separator)[0]
-        return self.__class__.objects.get(path=root_path)
+        return self._tree_objects().get(path=root_path)
 
     def is_root(self) -> bool:
         """Return True if this node has no parent (no DB query required)."""
@@ -367,7 +430,7 @@ class TreeNode(models.Model):
         Side effects:
             One DB EXISTS query.
         """
-        return not self.__class__.objects.filter(parent=self).exists()
+        return not self._tree_objects().filter(parent=self).exists()
 
     def get_descendant_count(self) -> int:
         """Return the total number of descendant nodes.
@@ -378,7 +441,7 @@ class TreeNode(models.Model):
         from .conf import get_setting
 
         separator = get_setting("ICV_TREE_PATH_SEPARATOR", "/")
-        return self.__class__.objects.filter(path__startswith=self.path + separator).count()
+        return self._tree_objects().filter(path__startswith=self.path + separator).count()
 
     def move_to(
         self,

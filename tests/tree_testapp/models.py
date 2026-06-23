@@ -41,6 +41,49 @@ class OptOutTree(TreeNode):
         return self.name
 
 
+class Page(TreeNode):
+    """Base of a multi-table-inheritance tree (like a CMS Page hierarchy).
+
+    Concrete child models (``RegularPage``, ``RedirectPage``) store their rows
+    in separate child tables but share the base ``Page`` table for the tree
+    columns. Tree walks must scope to this base table so a node's ancestors and
+    descendants are found regardless of which subtype wrote them.
+    """
+
+    name = models.CharField(max_length=100)
+
+    # Child rows live in their own tables; skip the startup integrity check.
+    check_tree_integrity = False
+
+    class Meta:
+        app_label = "tree_testapp"
+        db_table = "tree_testapp_page"
+        ordering = ["path"]
+
+    def __str__(self) -> str:
+        return self.name
+
+
+class RegularPage(Page):
+    """Concrete MTI child of Page."""
+
+    body = models.TextField(blank=True, default="")
+
+    class Meta:
+        app_label = "tree_testapp"
+        db_table = "tree_testapp_regularpage"
+
+
+class RedirectPage(Page):
+    """Second concrete MTI child of Page, stored in a sibling table."""
+
+    target_url = models.CharField(max_length=200, blank=True, default="")
+
+    class Meta:
+        app_label = "tree_testapp"
+        db_table = "tree_testapp_redirectpage"
+
+
 class Scope(models.Model):
     """Simple scope model (analogous to Vocabulary) for testing tree_scope_field."""
 
