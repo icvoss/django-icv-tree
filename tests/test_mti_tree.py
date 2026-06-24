@@ -121,3 +121,56 @@ class TestChildrenAndSiblingsAcrossSubtypes:
         leaf = mixed_tree["leaf"]  # RegularPage; root is also RegularPage here
         root = leaf.get_root()
         assert root.name == "root"
+
+
+@pytest.mark.django_db
+class TestInsertAcrossSubtypes:
+    """Write-path: order/path computation must scope to the base model.
+
+    Regression for the MTI fix being applied to reads only — the pre_save
+    handler counted siblings via ``sender.objects`` (the concrete subtype),
+    so a sibling written by a different subtype was not counted, producing
+    duplicate ``order`` values and colliding ``path`` strings.
+    """
+
+    def test_mixed_subtype_siblings_get_distinct_order(self, page_models):
+        Page, RegularPage, RedirectPage = page_models
+        root = RegularPage(name="root")
+        root.save()
+        a = RegularPage(name="a", parent=root)
+        a.save()
+        b = RedirectPage(name="b", parent=root, target_url="/x")
+        b.save()
+
+        a.refresh_from_db()
+        b.refresh_from_db()
+        # Siblings of different subtypes must occupy distinct order slots.
+        assert {a.order, b.order} == {0, 1}
+
+    def test_mixed_subtype_siblings_get_distinct_path(self, page_models):
+        Page, RegularPage, RedirectPage = page_models
+        root = RegularPage(name="root")
+        root.save()
+        a = RegularPage(name="a", parent=root)
+        a.save()
+        b = RedirectPage(name="b", parent=root, target_url="/x")
+        b.save()
+
+        a.refresh_from_db()
+        b.refresh_from_db()
+        assert a.path != b.path
+        # Both children sit one level under root, counted across the base table.
+        children = Page.objects.filter(parent=root).order_by("order")
+        assert list(children.values_list("name", flat=True)) == ["a", "b"]
+
+    def test_mixed_subtype_roots_get_distinct_order(self, page_models):
+        Page, RegularPage, RedirectPage = page_models
+        r1 = RegularPage(name="r1")
+        r1.save()
+        r2 = RedirectPage(name="r2", target_url="/x")
+        r2.save()
+
+        r1.refresh_from_db()
+        r2.refresh_from_db()
+        assert {r1.order, r2.order} == {0, 1}
+        assert r1.path != r2.path

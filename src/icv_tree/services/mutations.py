@@ -107,7 +107,9 @@ def _reorder_siblings_after_removal(
     of loading rows, mutating them, and calling bulk_update.
 
     Args:
-        model: The concrete TreeNode subclass.
+        model: A TreeNode subclass. For multi-table inheritance the tree
+            columns (order, parent_id, path) live on the base table, so this
+            resolves to the base tree model before touching the table.
         parent_id: The parent's PK (or None for roots).
         removed_order: The order value of the removed node.
         scope_filter: Optional dict of extra WHERE conditions used by scoped
@@ -119,6 +121,9 @@ def _reorder_siblings_after_removal(
     """
     from django.db import connection
 
+    # The order/parent_id/path columns live on the base tree model's table;
+    # for MTI subtypes the concrete table does not hold them.
+    model = model._tree_model()
     table = model._meta.db_table
 
     # Build a parameterised WHERE clause.  Column names are double-quoted
@@ -277,6 +282,11 @@ def move_to(
     step_length = get_setting("ICV_TREE_STEP_LENGTH", 4)
     batch_size = get_setting("ICV_TREE_REBUILD_BATCH_SIZE", 1000)
 
+    # All structural reads/writes route through the base tree model so that
+    # multi-table-inheritance subtypes share one path/order namespace.
+    tree_model = node._tree_model()
+    tree_objects = tree_model._default_manager
+
     # Cycle prevention.
     if target.pk == node.pk:
         raise TreeStructureError("Cannot move a node to itself.")
@@ -291,7 +301,7 @@ def move_to(
         if position == "first-child":
             new_order = 0
         else:  # last-child
-            sibling_count = node.__class__.objects.filter(parent_id=target.pk).count()
+            sibling_count = tree_objects.filter(parent_id=target.pk).count()
             if node.parent_id == target.pk:
                 sibling_count -= 1
             new_order = sibling_count
@@ -315,7 +325,7 @@ def move_to(
     with transaction.atomic():
         # Collect the node's descendants (before we change paths).
         descendants = list(
-            node.__class__.objects.filter(
+            tree_objects.filter(
                 path__startswith=old_path + separator,
             ).order_by("path")
         )
@@ -330,7 +340,7 @@ def move_to(
         # Running rebuild() after such a crash will recompute all path values from
         # the parent FK adjacency list and clean up any stale placeholder paths.
         placeholder_path = f"__MOVING_{uuid.uuid4().hex[:8]}__" + old_path
-        node.__class__.objects.filter(pk=node.pk).update(path=placeholder_path)
+        tree_objects.filter(pk=node.pk).update(path=placeholder_path)
 
         # Also update descendants to use the placeholder prefix.
         for desc in descendants:
@@ -338,12 +348,12 @@ def move_to(
             desc.depth = desc.path.count(separator)
         if descendants:
             for i in range(0, len(descendants), batch_size):
-                node.__class__.objects.bulk_update(descendants[i : i + batch_size], ["path", "depth"])
+                tree_objects.bulk_update(descendants[i : i + batch_size], ["path", "depth"])
 
         # Step 1: Close gap at source.
         # Siblings after old_order need to have their order decremented.
         source_siblings_after = list(
-            node.__class__.objects.filter(
+            tree_objects.filter(
                 parent_id=old_parent_id,
                 order__gt=old_order,
             ).order_by("order")  # ascending: lower paths updated first
@@ -364,7 +374,7 @@ def move_to(
             q = Q()
             for _sib, old_sib_path, _new in sib_path_map:
                 q |= Q(path__startswith=old_sib_path + separator)
-            all_sib_descendants = list(node.__class__.objects.filter(q).order_by("path"))
+            all_sib_descendants = list(tree_objects.filter(q).order_by("path"))
         else:
             all_sib_descendants = []
 
@@ -380,19 +390,19 @@ def move_to(
             sib_desc = sib_desc_map[old_sib_path]
             # Update sibling itself.
             sib.path = new_sib_path
-            node.__class__.objects.filter(pk=sib.pk).update(path=new_sib_path, depth=sib.depth, order=sib.order)
+            tree_objects.filter(pk=sib.pk).update(path=new_sib_path, depth=sib.depth, order=sib.order)
             # Update sibling's descendants.
             for desc in sib_desc:
                 desc.path = new_sib_path + desc.path[len(old_sib_path) :]
                 desc.depth = desc.path.count(separator)
             if sib_desc:
                 for i in range(0, len(sib_desc), batch_size):
-                    node.__class__.objects.bulk_update(sib_desc[i : i + batch_size], ["path", "depth"])
+                    tree_objects.bulk_update(sib_desc[i : i + batch_size], ["path", "depth"])
 
         # Step 2: Make room at destination.
         # Siblings at >= new_order need order incremented.
         dest_siblings_at_or_after = list(
-            node.__class__.objects.filter(
+            tree_objects.filter(
                 parent_id=new_parent_id,
                 order__gte=new_order,
             ).order_by("-order")  # DESCENDING: update highest path first to avoid collision
@@ -412,7 +422,7 @@ def move_to(
             q = Q()
             for _sib, old_sib_path, _new in dest_sib_path_map:
                 q |= Q(path__startswith=old_sib_path + separator)
-            all_dest_sib_descendants = list(node.__class__.objects.filter(q).order_by("-path"))
+            all_dest_sib_descendants = list(tree_objects.filter(q).order_by("-path"))
         else:
             all_dest_sib_descendants = []
 
@@ -428,21 +438,21 @@ def move_to(
             sib_desc = dest_sib_desc_map[old_sib_path]
             # Update sibling itself (highest order first = descending).
             sib.path = new_sib_path
-            node.__class__.objects.filter(pk=sib.pk).update(path=new_sib_path, depth=sib.depth, order=sib.order)
+            tree_objects.filter(pk=sib.pk).update(path=new_sib_path, depth=sib.depth, order=sib.order)
             # Update sibling's descendants.
             for desc in sib_desc:
                 desc.path = new_sib_path + desc.path[len(old_sib_path) :]
                 desc.depth = desc.path.count(separator)
             if sib_desc:
                 for i in range(0, len(sib_desc), batch_size):
-                    node.__class__.objects.bulk_update(sib_desc[i : i + batch_size], ["path", "depth"])
+                    tree_objects.bulk_update(sib_desc[i : i + batch_size], ["path", "depth"])
 
         # Step 3: Compute new path for the moved node.
         new_depth = (new_parent_depth + 1) if new_parent_id is not None else 0
         new_path = _compute_new_path(new_parent_path, new_order, separator, step_length)
 
         # Step 4: Update the moved node from placeholder to final path.
-        node.__class__.objects.filter(pk=node.pk).update(
+        tree_objects.filter(pk=node.pk).update(
             parent_id=new_parent_id,
             path=new_path,
             depth=new_depth,
@@ -461,20 +471,20 @@ def move_to(
                 desc.path = new_path + desc.path[len(old_placeholder) :]
                 desc.depth = desc.path.count(separator)
             for i in range(0, len(descendants), batch_size):
-                node.__class__.objects.bulk_update(descendants[i : i + batch_size], ["path", "depth"])
+                tree_objects.bulk_update(descendants[i : i + batch_size], ["path", "depth"])
 
     # Emit signal after commit.
     if new_parent_id is not None:
         try:
-            new_parent_instance = node.__class__.objects.get(pk=new_parent_id)
-        except node.__class__.DoesNotExist:
+            new_parent_instance = tree_objects.get(pk=new_parent_id)
+        except tree_model.DoesNotExist:
             new_parent_instance = None
     else:
         new_parent_instance = None
 
     def _emit() -> None:
         node_moved.send(
-            sender=node.__class__,
+            sender=tree_model,
             instance=node,
             old_parent=old_parent_instance,
             new_parent=new_parent_instance,

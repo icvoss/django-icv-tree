@@ -82,6 +82,11 @@ def handle_pre_save(sender, instance, **kwargs) -> None:  # type: ignore[no-unty
         separator = get_setting("ICV_TREE_PATH_SEPARATOR", "/")
         step_length = get_setting("ICV_TREE_STEP_LENGTH", 4)
 
+        # Route sibling counts through the base tree model so that siblings
+        # written by a different MTI subtype are counted. Using sender.objects
+        # would miss them and produce duplicate order / colliding paths.
+        tree_objects = sender._tree_objects()
+
         with __import__("django.db", fromlist=["transaction"]).transaction.atomic():
             parent = instance.parent
 
@@ -94,11 +99,11 @@ def handle_pre_save(sender, instance, **kwargs) -> None:  # type: ignore[no-unty
 
             if parent is not None:
                 # Count existing children to determine order.
-                order = sender.objects.filter(parent_id=parent.pk, **scope_filter).count()
+                order = tree_objects.filter(parent_id=parent.pk, **scope_filter).count()
                 depth = parent.depth + 1
                 parent_path = parent.path
             else:
-                order = sender.objects.filter(parent__isnull=True, **scope_filter).count()
+                order = tree_objects.filter(parent__isnull=True, **scope_filter).count()
                 depth = 0
                 parent_path = None
 
@@ -137,6 +142,10 @@ def handle_pre_save(sender, instance, **kwargs) -> None:  # type: ignore[no-unty
                 separator = get_setting("ICV_TREE_PATH_SEPARATOR", "/")
                 step_length = get_setting("ICV_TREE_STEP_LENGTH", 4)
 
+                # Route through the base tree model so MTI subtype siblings
+                # and descendants are seen.
+                tree_objects = sender._tree_objects()
+
                 with __import__("django.db", fromlist=["transaction"]).transaction.atomic():
                     old_parent_id = instance.parent_id
                     old_order = instance.order
@@ -147,13 +156,13 @@ def handle_pre_save(sender, instance, **kwargs) -> None:  # type: ignore[no-unty
                     if scope_field:
                         scope_filter[f"{scope_field}_id"] = getattr(instance, f"{scope_field}_id")
 
-                    new_order = sender.objects.filter(parent__isnull=True, **scope_filter).count()
+                    new_order = tree_objects.filter(parent__isnull=True, **scope_filter).count()
                     new_path = _compute_new_path(None, new_order, separator, step_length)
 
                     # Update descendants.
                     old_path = instance.path
                     descendants = list(
-                        sender.objects.filter(
+                        tree_objects.filter(
                             path__startswith=old_path + separator,
                         ).order_by("path")
                     )
@@ -168,7 +177,7 @@ def handle_pre_save(sender, instance, **kwargs) -> None:  # type: ignore[no-unty
                             desc.depth = desc.path.count(separator)
                         batch_size = get_setting("ICV_TREE_REBUILD_BATCH_SIZE", 1000)
                         for i in range(0, len(descendants), batch_size):
-                            sender.objects.bulk_update(
+                            tree_objects.bulk_update(
                                 descendants[i : i + batch_size],
                                 ["path", "depth"],
                             )

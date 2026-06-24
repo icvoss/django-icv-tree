@@ -20,6 +20,15 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   base model via the new `TreeNode._tree_model()` / `_tree_objects()` helpers.
   Non-inherited models are unaffected (the helpers resolve to the model itself).
 
+- **Insert/move path computation across multi-table-inheritance subtypes.**
+  The write path counted siblings via the concrete subtype's manager
+  (`sender.objects` / `node.__class__.objects`), so a sibling written by a
+  different MTI subtype was not counted — producing duplicate `order` values
+  and colliding `path` strings. The `pre_save` handler, the root-move branch,
+  `_reorder_siblings_after_removal`, and `move_to` now route sibling counts and
+  structural updates through the base tree model. Non-inherited and scoped
+  (non-MTI) trees are unaffected.
+
 ## [0.2.0] — 2026-04-08
 
 Promoted to Production/Stable.
