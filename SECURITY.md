@@ -4,16 +4,15 @@
 
 | Version | Supported |
 |---------|-----------|
-| 0.1.x   | Yes       |
+| 0.2.x   | Yes       |
 
-Only the latest release in the `0.1.x` series receives security fixes.
+Only the latest release in the `0.2.x` series receives security fixes.
 
 ## Reporting a Vulnerability
 
 Please do **not** open a public GitHub issue for security vulnerabilities.
 
-Report vulnerabilities by email to **security@icvdjango.example.com** (replace
-with the actual maintainer address before publication). Include:
+Report vulnerabilities by email to **itsonlyme@nigelcopley.com**. Include:
 
 - A description of the vulnerability and its potential impact.
 - Steps to reproduce or a minimal proof-of-concept.
