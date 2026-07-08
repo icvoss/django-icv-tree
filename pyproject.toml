@@ -44,11 +44,11 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/nigelcopley/django-icv-tree"
-Documentation = "https://github.com/nigelcopley/django-icv-tree"
-Changelog = "https://github.com/nigelcopley/django-icv-tree/blob/main/CHANGELOG.md"
-"Issue Tracker" = "https://github.com/nigelcopley/django-icv-tree/issues"
-"Source Code" = "https://github.com/nigelcopley/django-icv-tree"
+Homepage = "https://github.com/icvoss/django-icv-tree"
+Documentation = "https://github.com/icvoss/django-icv-tree"
+Changelog = "https://github.com/icvoss/django-icv-tree/blob/main/CHANGELOG.md"
+"Issue Tracker" = "https://github.com/icvoss/django-icv-tree/issues"
+"Source Code" = "https://github.com/icvoss/django-icv-tree"
 
 [tool.setuptools.packages.find]
 where = ["src"]

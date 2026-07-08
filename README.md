@@ -1,10 +1,10 @@
 # django-icv-tree
 
-[![CI](https://github.com/nigelcopley/django-icv-tree/actions/workflows/ci.yml/badge.svg)](https://github.com/nigelcopley/django-icv-tree/actions/workflows/ci.yml)
+[![CI](https://github.com/icvoss/django-icv-tree/actions/workflows/ci.yml/badge.svg)](https://github.com/icvoss/django-icv-tree/actions/workflows/ci.yml)
 [![PyPI version](https://img.shields.io/pypi/v/django-icv-tree.svg)](https://pypi.org/project/django-icv-tree/)
 [![Python versions](https://img.shields.io/pypi/pyversions/django-icv-tree.svg)](https://pypi.org/project/django-icv-tree/)
 [![Django versions](https://img.shields.io/pypi/djversions/django-icv-tree.svg)](https://pypi.org/project/django-icv-tree/)
-[![Licence: MIT](https://img.shields.io/badge/Licence-MIT-blue.svg)](https://github.com/nigelcopley/django-icv-tree/blob/main/LICENSE)
+[![Licence: MIT](https://img.shields.io/badge/Licence-MIT-blue.svg)](https://github.com/icvoss/django-icv-tree/blob/main/LICENSE)
 
 Hierarchical data in Django without the complexity. `django-icv-tree` stores
 tree structures as materialised paths — every node knows its full ancestry in a

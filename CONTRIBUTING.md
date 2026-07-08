@@ -17,7 +17,7 @@ No PostgreSQL is needed — the test suite uses SQLite.
 ## Local Development Setup
 
 ```bash
-git clone https://github.com/nigelcopley/django-icv-tree.git
+git clone https://github.com/icvoss/django-icv-tree.git
 cd django-icv-tree
 
 # Create a virtual environment
