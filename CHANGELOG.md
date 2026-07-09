@@ -7,7 +7,15 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
-## [Unreleased]
+## [0.3.0] - 2026-07-09
+
+### Changed
+
+- Minimum Django is now 5.2 (was 5.0). Django 5.2 and 6.0 are the
+  supported and CI-tested versions.
+- Packaging: the build backend now requires setuptools 77+ (PEP 639
+  SPDX licence metadata) and no longer lists wheel; project URLs point
+  at the icvoss GitHub organisation.
 
 ## [0.2.1] — 2026-06-24
 
