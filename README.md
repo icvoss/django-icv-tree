@@ -1,5 +1,5 @@
 <p align="center">
-  <img src=".github/logo.svg" alt="" width="88">
+  <img src="https://raw.githubusercontent.com/icvoss/django-icv-tree/main/.github/logo.svg" alt="" width="88">
 </p>
 
 # django-icv-tree
