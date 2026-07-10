@@ -22,7 +22,7 @@ separate "publish" step and no undo.**
    - `src/icv_tree/__init__.py` the `__version__` string (keep in sync)
    - `CHANGELOG.md`: rename `[Unreleased]` to `[<version>] - <YYYY-MM-DD>`
 3. **Open a PR** to `main`. CI runs lint and tests. Get it reviewed. This is the
-   gate — do not skip it.
+   gate: do not skip it.
 4. **Merge to `main`** (squash or merge, per repo norm).
 5. **Tag the merged commit on `main`** and push the tag:
    ```bash
@@ -38,12 +38,12 @@ separate "publish" step and no undo.**
    ```
 
 Tag the commit that is on `main`, not a feature branch. Tags point at commits,
-not branches, so tagging a feature branch will publish — but it publishes code
+not branches, so tagging a feature branch will publish, but it publishes code
 that may never have been merged. Always tag after the merge.
 
 ## Tag format (strict)
 
-`v<semver>` — just `v` then the version number. The publish workflow matches
+`v<semver>`: just `v` then the version number. The publish workflow matches
 `v*` and parses the version by stripping the leading `v`.
 
 Examples: `v0.2.1`, `v0.3.0`, `v1.0.0`.
@@ -70,7 +70,7 @@ Any breaking change to `icv_tree`'s public API requires a coordinated release of
 changes in the CHANGELOG and open a companion issue in the taxonomy repo before
 tagging.
 
-## CHANGELOG (required — every release)
+## CHANGELOG (required for every release)
 
 **A release MUST include a CHANGELOG entry for its version. No entry, no tag.**
 The publish workflow's `resolve` job greps `CHANGELOG.md` for the version heading
@@ -80,7 +80,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Accumulate entries unde
 `## [Unreleased]` as you work; at release time rename that heading to
 `## [<version>] - <YYYY-MM-DD>`. Subsections: Added / Changed / Fixed / Removed.
 
-Call out behaviour changes explicitly, including ones that are "safer" — a
+Call out behaviour changes explicitly, including ones that are "safer": a
 consumer relying on the old behaviour still needs to know.
 
 ## Django pin
@@ -119,6 +119,6 @@ Before pushing the tag (the irreversible step):
 
 Consider adding a **manual approval gate** to the `publish` job via a protected
 GitHub Environment (`pypi`), so "push tag" and "irreversibly upload to PyPI" are
-decoupled — a human approves the upload after seeing test and build go green. The
+decoupled: a human approves the upload after seeing test and build go green. The
 workflow already declares `environment: pypi`; add a required-reviewer protection
 rule to that environment to enable the gate.

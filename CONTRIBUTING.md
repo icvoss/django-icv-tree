@@ -10,7 +10,7 @@ Practical guide for contributors to this package.
 - [uv](https://docs.astral.sh/uv/) (recommended) or pip
 - Django 5.1 or later (installed as part of the dev setup)
 
-No PostgreSQL is needed — the test suite uses SQLite.
+No PostgreSQL is needed: the test suite uses SQLite.
 
 ---
 

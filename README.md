@@ -7,12 +7,12 @@
 [![Licence: MIT](https://img.shields.io/badge/Licence-MIT-blue.svg)](https://github.com/icvoss/django-icv-tree/blob/main/LICENSE)
 
 Hierarchical data in Django without the complexity. `django-icv-tree` stores
-tree structures as materialised paths — every node knows its full ancestry in a
+tree structures as materialised paths: every node knows its full ancestry in a
 single indexed column, so ancestor, descendant, and sibling queries are fast
 prefix lookups rather than recursive joins or nested set bookkeeping.
 
 One abstract model, one manager, one queryset. Every traversal method returns a
-lazy `QuerySet` — no Python list coercions, no surprise N+1 queries. Configurable
+lazy `QuerySet`: no Python list coercions, no surprise N+1 queries. Configurable
 path format, async-safe, zero tenancy coupling.
 
 Replaces **django-mptt**, **django-treebeard** (materialised path), and
@@ -63,7 +63,7 @@ cases = Category(name="Cases", parent=phones)
 cases.save()                              # path="0001/0001/0001", depth=2, order=0
 ```
 
-Path, depth, and order are computed automatically on save — you never set them
+Path, depth, and order are computed automatically on save; you never set them
 manually.
 
 ---
@@ -100,7 +100,7 @@ Category.objects.descendants_of(node)
 Category.objects.children_of(node)
 Category.objects.siblings_of(node)
 
-# QuerySet — chain with any Django filter
+# QuerySet: chain with any Django filter
 Category.objects.descendants_of(node).filter(is_active=True)
 Category.objects.with_tree_fields()         # annotates is_root, child_count
 ```
@@ -139,8 +139,8 @@ python manage.py icv_tree_rebuild --model=myapp.Category
 ```
 
 Options:
-- `--dry-run` — report what would change without writing
-- `--check` — run integrity checks only, exit 1 if issues found
+- `--dry-run`: report what would change without writing
+- `--check`: run integrity checks only, exit 1 if issues found
 
 On PostgreSQL with `ICV_TREE_ENABLE_CTE = True`, rebuild uses a recursive CTE
 for better performance on large trees.
@@ -163,8 +163,8 @@ result = check_tree_integrity(Category)
 ```
 
 Django system checks run automatically at startup:
-- `icv_tree.E001` — orphaned nodes (parent references missing row)
-- `icv_tree.E002` — path inconsistencies (depth mismatch, prefix violation, duplicates)
+- `icv_tree.E001`: orphaned nodes (parent references missing row)
+- `icv_tree.E002`: path inconsistencies (depth mismatch, prefix violation, duplicates)
 
 Models can opt out with `check_tree_integrity = False` on the class.
 

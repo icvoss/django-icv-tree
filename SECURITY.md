@@ -38,15 +38,15 @@ We will credit reporters in the advisory unless anonymity is requested.
 
 icv-tree is a pure library package. Its attack surface is narrow by design:
 
-- **No views or URL routing** — icv-tree registers no HTTP endpoints.
+- **No views or URL routing**: icv-tree registers no HTTP endpoints.
   Consuming projects are responsible for all access control.
-- **No user input handled directly** — all write paths accept model
+- **No user input handled directly**: all write paths accept model
   instances and Python values from the calling application layer.
   Input validation is the responsibility of the consuming project's
   forms, serialisers, or service layer.
-- **No network I/O** — icv-tree makes no outbound connections.
-- **No file I/O** — icv-tree does not read from or write to the filesystem.
-- **Template tags** — ``{% recurse_tree %}`` and ``{% tree_breadcrumbs %}``
+- **No network I/O**: icv-tree makes no outbound connections.
+- **No file I/O**: icv-tree does not read from or write to the filesystem.
+- **Template tags**: ``{% recurse_tree %}`` and ``{% tree_breadcrumbs %}``
   do not call ``mark_safe`` anywhere. All output is subject to Django's
   standard auto-escaping. Node attribute values that may contain user
   content are escaped by the template engine before rendering.
