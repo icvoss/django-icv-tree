@@ -7,6 +7,22 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [0.3.1] - 2026-07-28
+
+### Fixed
+
+- **UUID-PK trees no longer crash on non-root deletion under SQLite**
+  (issue #2). `_reorder_siblings_after_removal` passed the parent's PK
+  straight to a raw `cursor.execute`; when the tree model used a
+  `UUIDField` primary key, `parent_id` was a `uuid.UUID`, which SQLite's
+  DBAPI driver rejects (`sqlite3.ProgrammingError: type 'UUID' is not
+  supported`). Postgres stringifies UUID in its driver, which masked the
+  bug there. Bind values are now coerced with a small `_bind()` helper
+  (`str(uuid)`, everything else unchanged), so the raw reorder is
+  backend-agnostic. The same coercion is applied to `scope_filter` values,
+  which had the identical latent issue for a UUID scope key. Regression
+  tests cover a UUID-PK tree model deleting a non-root node.
+
 ## [0.3.0] - 2026-07-09
 
 ### Changed
