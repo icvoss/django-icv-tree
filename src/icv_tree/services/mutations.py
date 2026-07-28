@@ -90,6 +90,27 @@ def _insert_node(
     node.path = _compute_new_path(parent_path, order, separator, step_length)
 
 
+def _bind(value):
+    """Coerce a value to a DBAPI-safe bind parameter for a raw cursor.execute.
+
+    A ``uuid.UUID`` is not an accepted bind type on every backend (SQLite's
+    driver accepts only str/int/float/bytes/None), so a UUID PK or a UUID
+    scope value must be stringified before it reaches ``cursor.execute``.
+    Postgres stringifies UUID itself, but doing it here makes the raw SQL path
+    backend-agnostic.
+
+    Django's UUIDField stores UUIDs in hex format without dashes (e.g.
+    'f0d389d358374607932ecbe68e7d1fd4', not 'f0d389d3-5837-4607-932e-cbe68e7d1fd4'),
+    so we use ``.hex`` to match the database representation.
+
+    Everything else (int order values, str/int scope values, None) passes
+    through unchanged.
+    """
+    if isinstance(value, uuid.UUID):
+        return value.hex
+    return value
+
+
 def _reorder_siblings_after_removal(
     model: type,
     parent_id,
@@ -129,18 +150,25 @@ def _reorder_siblings_after_removal(
     # Build a parameterised WHERE clause.  Column names are double-quoted
     # (ANSI SQL) to avoid reserved-word clashes; "order" is reserved on most
     # SQL engines.
+    #
+    # Bind values are coerced with _bind() so a UUID PK works on every backend.
+    # A raw ``uuid.UUID`` is not an accepted DBAPI bind type on SQLite
+    # (``sqlite3`` accepts only str/int/float/bytes/None), so a UUID-PK tree
+    # model raised ``sqlite3.ProgrammingError`` here on any non-root deletion.
+    # Postgres's driver stringifies UUID itself, which masked the bug there.
+    # Stringifying matches how the ORM serialises a UUID for the backend.
     if parent_id is None:
         parent_clause = '"parent_id" IS NULL'
         params: list = [removed_order]
     else:
         parent_clause = '"parent_id" = %s'
-        params = [parent_id, removed_order]
+        params = [_bind(parent_id), removed_order]
 
     scope_clauses: list[str] = []
     if scope_filter:
         for col, val in scope_filter.items():
             scope_clauses.append(f'"{col}" = %s')
-            params.append(val)
+            params.append(_bind(val))
 
     extra_where = (" AND " + " AND ".join(scope_clauses)) if scope_clauses else ""
 

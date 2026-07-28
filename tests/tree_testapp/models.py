@@ -2,9 +2,32 @@
 
 from __future__ import annotations
 
+import uuid
+
 from django.db import models
 
 from icv_tree.models import TreeNode
+
+
+class UUIDTree(TreeNode):
+    """TreeNode subclass with a UUID primary key.
+
+    Regression fixture for the sqlite UUID-bind bug (icvoss/django-icv-tree#2):
+    ``_reorder_siblings_after_removal`` passed ``parent_id`` (a ``uuid.UUID``)
+    straight to a raw ``cursor.execute``, which SQLite rejects. Deleting a
+    non-root node exercises that path.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=100)
+
+    class Meta:
+        app_label = "tree_testapp"
+        db_table = "tree_testapp_uuidtree"
+        ordering = ["path"]
+
+    def __str__(self) -> str:
+        return self.name
 
 
 class SimpleTree(TreeNode):

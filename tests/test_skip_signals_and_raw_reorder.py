@@ -254,3 +254,57 @@ class TestReorderSiblingsAfterRemoval:
         assert a2.order == 0  # decremented within scope A
         assert b1.order == 0  # unchanged — different scope
         assert count == 1
+
+
+@pytest.mark.django_db
+class TestReorderSiblingsUUIDPrimaryKey:
+    """Regression for icvoss/django-icv-tree#2: UUID PK bind on the raw reorder.
+
+    A ``uuid.UUID`` passed straight to ``cursor.execute`` raised
+    ``sqlite3.ProgrammingError`` (SQLite rejects UUID bind values). Postgres
+    masked it by stringifying UUID in its driver. These tests run on whatever
+    backend CI uses; on SQLite they fail without the ``str()`` coercion.
+    """
+
+    def test_delete_non_root_node_with_uuid_pk_does_not_raise(self):
+        """Deleting a non-root node on a UUID-PK tree must reorder, not crash."""
+        from tree_testapp.models import UUIDTree
+
+        root = UUIDTree.objects.create(name="root")
+        c1 = UUIDTree.objects.create(name="c1", parent=root)
+        c2 = UUIDTree.objects.create(name="c2", parent=root)
+        c3 = UUIDTree.objects.create(name="c3", parent=root)
+
+        for node in (c1, c2, c3):
+            node.refresh_from_db()
+        assert (c1.order, c2.order, c3.order) == (0, 1, 2)
+
+        # This is the operation that raised sqlite3.ProgrammingError pre-fix:
+        # the post_delete handler calls _reorder_siblings_after_removal with a
+        # uuid.UUID parent_id.
+        c1.delete()
+
+        c2.refresh_from_db()
+        c3.refresh_from_db()
+        assert c2.order == 0  # decremented by the handler
+        assert c3.order == 1
+
+    def test_reorder_helper_accepts_uuid_parent_id(self):
+        """_reorder_siblings_after_removal accepts a uuid.UUID parent_id directly."""
+        from tree_testapp.models import UUIDTree
+
+        from icv_tree.services.mutations import _reorder_siblings_after_removal
+
+        root = UUIDTree.objects.create(name="root")
+        c1 = UUIDTree.objects.create(name="c1", parent=root)
+        c2 = UUIDTree.objects.create(name="c2", parent=root)
+
+        for node in (c1, c2):
+            node.refresh_from_db()
+
+        # root.pk is a uuid.UUID; pre-fix this raised on the sqlite leg.
+        count = _reorder_siblings_after_removal(UUIDTree, root.pk, removed_order=0)
+
+        c2.refresh_from_db()
+        assert c2.order == 0  # was 1, decremented
+        assert count == 1
