@@ -129,6 +129,38 @@ emitted after commit.
 
 Cycle detection prevents moving a node under its own descendant.
 
+### Reordering a subset of siblings
+
+`move_to` changes how many slots a sibling list has (it inserts into, or
+removes a node from, the list). For the common case of reordering rows that
+already share a parent, `reorder_siblings` is a narrower, cheaper primitive
+that never adds or removes a slot:
+
+```python
+from icv_tree.services import reorder_siblings
+
+reorder_siblings(Category, ordered_ids=[c3.pk, c1.pk, c2.pk])
+```
+
+`ordered_ids` names a set of sibling rows (they must all share one parent,
+which may be `None` for roots) and gives the sequence you want them in. The
+listed rows are permuted across the `(order, path)` slots they already
+occupy: the current slots are collected and sorted, then handed out to the
+rows in the order you gave. Every sibling that is not listed, including
+other siblings of the same parent interleaved between the listed ones, is
+left completely untouched, its path, depth, and order are byte-for-byte
+unchanged.
+
+This is what lets a consumer reorder only the rows it owns within a shared
+sibling list, for example a root sibling list that spans several
+`tree_scope_field` values, without touching any other scope's roots and
+without a rebuild.
+
+`reorder_siblings` is atomic, raises `TreeStructureError` for an empty or
+duplicate id list, an unknown id, or ids that do not all share one parent,
+and does not emit a signal (there is no single-node shape for a multi-row
+permutation).
+
 ---
 
 ## Rebuilding

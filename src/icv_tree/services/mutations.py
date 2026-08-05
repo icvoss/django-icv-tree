@@ -13,6 +13,16 @@ Design notes on path uniqueness during moves:
     2. When DECREMENTING (closing gap): update in ASCENDING order.
     3. For descendants of shifted siblings, update them together with the sibling
        in a single bulk_update pass.
+
+Design notes on path uniqueness during an arbitrary permutation
+(reorder_siblings): a shift only ever moves a contiguous range by one step,
+so a single ascending or descending pass is always collision-safe. An
+arbitrary permutation of N slots (for example a 3-cycle) has no such
+monotonic-safe ordering in general, so reorder_siblings clears every row it
+is about to move to a unique placeholder path first, then writes the final
+paths in a second pass. This is the same two-phase trick move_to already
+uses for the single node it moves, generalised to every row in the
+permutation.
 """
 
 from __future__ import annotations
@@ -520,3 +530,179 @@ def move_to(
         )
 
     transaction.on_commit(_emit)
+
+
+def reorder_siblings(model: type, ordered_ids: list) -> None:
+    """Permute a set of sibling rows across the path slots they already occupy.
+
+    Contract: ``ordered_ids`` identifies a set of sibling rows (all sharing
+    the same parent, which may be ``None`` for roots). This function does
+    NOT insert, remove, or renumber the sibling list; it only permutes the
+    rows named in ``ordered_ids`` across the ``(order, path)`` slots those
+    same rows already occupy:
+
+      1. The current slots occupied by the listed rows are collected and
+         sorted ascending (by order, equivalently by path step).
+      2. Those sorted slots are assigned to the rows in the exact sequence
+         given by ``ordered_ids``: the first id gets the lowest slot, the
+         last id gets the highest slot.
+
+    Every sibling of the same parent that is NOT named in ``ordered_ids``
+    (including siblings interleaved between the listed rows by order) is
+    left completely untouched: its path, depth, and order are byte-for-byte
+    unchanged. Listing a strict subset of a parent's children is supported
+    and is the intended use for a scoped consumer that wants to reorder
+    only the rows it owns within a shared sibling list (for example, a
+    root sibling list that spans several tree_scope_field values).
+
+    Because this operation never adds or removes a slot, it never needs a
+    rebuild(): it stays entirely within the slots already occupied by the
+    listed rows.
+
+    Args:
+        model: A concrete TreeNode subclass.
+        ordered_ids: The primary keys of the sibling rows to permute, in
+            the desired final order. Must contain at least one id, no
+            duplicates, and every id must reference a row that exists and
+            shares the same parent as every other listed row.
+
+    Returns:
+        None
+
+    Raises:
+        TreeStructureError: If ``ordered_ids`` is empty, contains a
+            duplicate, references an id that does not exist, or references
+            rows that do not all share the same parent.
+
+    Side effects:
+        - Rewrites path, depth, and order for every listed row and its
+          descendants (siblings not listed, and their descendants, are
+          never read for writing)
+        - Wrapped in transaction.atomic()
+        - bulk_update() in batches per ICV_TREE_REBUILD_BATCH_SIZE
+        - No-op if the requested sequence already matches the current order
+        - Does not emit a signal: node_moved's payload (a single node, its
+          old/new parent, its old path) has no natural shape for a
+          multi-row permutation with no parent change, so no signal is
+          raised. Connect to your own post-request signal if a reorder
+          needs to be observed.
+    """
+    from ..conf import get_setting
+
+    if not ordered_ids:
+        raise TreeStructureError("reorder_siblings() requires at least one id in ordered_ids.")
+
+    if len(set(ordered_ids)) != len(ordered_ids):
+        raise TreeStructureError("reorder_siblings() received duplicate ids in ordered_ids.")
+
+    separator = get_setting("ICV_TREE_PATH_SEPARATOR", "/")
+    step_length = get_setting("ICV_TREE_STEP_LENGTH", 4)
+    batch_size = get_setting("ICV_TREE_REBUILD_BATCH_SIZE", 1000)
+
+    # All structural reads/writes route through the base tree model so that
+    # multi-table-inheritance subtypes share one path/order namespace, the
+    # same routing move_to() uses.
+    tree_model = model._tree_model()
+    tree_objects = tree_model._default_manager
+
+    rows = list(tree_objects.filter(pk__in=ordered_ids).select_related("parent"))
+    rows_by_pk = {row.pk: row for row in rows}
+
+    missing = [pk for pk in ordered_ids if pk not in rows_by_pk]
+    if missing:
+        raise TreeStructureError(f"reorder_siblings() could not find row(s) with id(s): {missing!r}.")
+
+    parent_ids = {row.parent_id for row in rows}
+    if len(parent_ids) > 1:
+        raise TreeStructureError(
+            f"reorder_siblings() requires every row to share one parent; got parent_id values: {parent_ids!r}."
+        )
+
+    # Ordered list of TreeNode instances matching ordered_ids exactly.
+    ordered_rows = [rows_by_pk[pk] for pk in ordered_ids]
+
+    # The rows' shared parent, needed to recompute each slot's path string.
+    parent_path = ordered_rows[0].parent.path if ordered_rows[0].parent_id is not None else None
+    depth = ordered_rows[0].depth
+
+    # Step 1: collect the slots the listed rows currently occupy, sorted
+    # ascending. These are the ONLY slots that will be written; every other
+    # sibling's slot is left alone.
+    current_slots = sorted(row.order for row in ordered_rows)
+
+    # Step 2: assign slots to rows in the requested sequence and detect the
+    # no-op case (already in the requested order).
+    assignments: list[tuple] = []  # (row, new_order, new_path)
+    changed = False
+    for row, new_order in zip(ordered_rows, current_slots, strict=True):
+        new_path = _compute_new_path(parent_path, new_order, separator, step_length)
+        if row.order != new_order or row.path != new_path:
+            changed = True
+        assignments.append((row, new_order, new_path))
+
+    if not changed:
+        return
+
+    with transaction.atomic():
+        # Collect descendants of every listed row up front, keyed by the
+        # row's pk (not its path, which is about to change twice).
+        descendants_by_pk: dict = {row.pk: [] for row in ordered_rows}
+        desc_q = Q()
+        for row in ordered_rows:
+            desc_q |= Q(path__startswith=row.path + separator)
+        if ordered_rows:
+            for desc in tree_objects.filter(desc_q).order_by("path"):
+                for row in ordered_rows:
+                    if desc.path.startswith(row.path + separator):
+                        descendants_by_pk[row.pk].append(desc)
+                        break
+
+        # Phase 1: vacate every listed row's real path to a unique
+        # placeholder, moving its descendants' paths onto the placeholder
+        # prefix in the same pass. An arbitrary permutation has no
+        # monotonic-safe write order in general (a 3-cycle collides whether
+        # written ascending or descending in a single pass), so every row
+        # must vacate its real path before any row lands on its final path.
+        # The UUID suffix mirrors move_to()'s placeholder: a crash
+        # mid-permutation leaves a recognisable, uniquely-suffixed value
+        # that rebuild() (scoped or full) can repair.
+        placeholder_by_pk: dict = {}
+        vacate_updates: list = []
+        for row in ordered_rows:
+            old_path = row.path
+            placeholder = f"__REORDER_{uuid.uuid4().hex[:8]}__" + old_path
+            placeholder_by_pk[row.pk] = placeholder
+            row.path = placeholder
+            vacate_updates.append(row)
+            for desc in descendants_by_pk[row.pk]:
+                desc.path = placeholder + desc.path[len(old_path) :]
+                desc.depth = desc.path.count(separator)
+                vacate_updates.append(desc)
+
+        for i in range(0, len(vacate_updates), batch_size):
+            tree_objects.bulk_update(vacate_updates[i : i + batch_size], ["path", "depth"])
+
+        # Phase 2: land every listed row on its final order and path,
+        # moving its descendants' paths onto the final prefix. Every row is
+        # currently on a unique placeholder, so writing the final paths in
+        # any order is collision-safe. Rows and their descendants are
+        # batched separately because they update different field sets (a
+        # descendant's own order never changes), mirroring move_to()'s
+        # existing sibling-versus-descendant bulk_update split.
+        landed_rows: list = []
+        landed_descendants: list = []
+        for row, new_order, new_path in assignments:
+            placeholder = placeholder_by_pk[row.pk]
+            row.order = new_order
+            row.path = new_path
+            row.depth = depth
+            landed_rows.append(row)
+            for desc in descendants_by_pk[row.pk]:
+                desc.path = new_path + desc.path[len(placeholder) :]
+                desc.depth = desc.path.count(separator)
+                landed_descendants.append(desc)
+
+        for i in range(0, len(landed_rows), batch_size):
+            tree_objects.bulk_update(landed_rows[i : i + batch_size], ["path", "depth", "order"])
+        for i in range(0, len(landed_descendants), batch_size):
+            tree_objects.bulk_update(landed_descendants[i : i + batch_size], ["path", "depth"])
