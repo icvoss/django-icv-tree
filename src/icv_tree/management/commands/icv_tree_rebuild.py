@@ -8,6 +8,7 @@ Usage examples::
     python manage.py icv_tree_rebuild --model=myapp.Page
     python manage.py icv_tree_rebuild --model=myapp.Page --dry-run
     python manage.py icv_tree_rebuild --model=myapp.Page --check
+    python manage.py icv_tree_rebuild --model=myapp.Term --scope=5
 """
 
 from __future__ import annotations
@@ -44,11 +45,23 @@ class Command(BaseCommand):
                 "Run check_tree_integrity() and report issues without repairing. Exits with code 1 if issues are found."
             ),
         )
+        parser.add_argument(
+            "--scope",
+            type=str,
+            default=None,
+            help=(
+                "Restrict the rebuild to the tree_scope_field value given "
+                "(e.g. the scope FK's primary key). Only valid for models "
+                "that define tree_scope_field; other scopes are left "
+                "untouched. Ignored by --check."
+            ),
+        )
 
     def handle(self, *args, **kwargs) -> None:  # type: ignore[no-untyped-def]
         model_path = kwargs["model"]
         dry_run = kwargs["dry_run"]
         check_only = kwargs["check"]
+        scope = kwargs["scope"]
         verbosity = kwargs["verbosity"]
 
         # Import the model.
@@ -69,12 +82,15 @@ class Command(BaseCommand):
         if not issubclass(model, TreeNode):
             raise CommandError(f"'{model_path}' is not a TreeNode subclass.")
 
+        if scope is not None and getattr(model, "tree_scope_field", None) is None:
+            raise CommandError(f"'{model_path}' does not define tree_scope_field, so --scope cannot be used.")
+
         if check_only:
             self._run_check(model, verbosity)
         elif dry_run:
             self._run_dry_run(model, verbosity)
         else:
-            self._run_rebuild(model, verbosity)
+            self._run_rebuild(model, verbosity, scope)
 
     def _run_check(self, model, verbosity: int) -> None:  # type: ignore[no-untyped-def]
         from icv_tree.services import check_tree_integrity
@@ -138,20 +154,21 @@ class Command(BaseCommand):
                 self.style.WARNING(f"{model_label}: {total_issues} issue(s) would be repaired by rebuild.")
             )
 
-    def _run_rebuild(self, model, verbosity: int) -> None:  # type: ignore[no-untyped-def]
+    def _run_rebuild(self, model, verbosity: int, scope: str | None = None) -> None:  # type: ignore[no-untyped-def]
         from icv_tree.services import rebuild
 
         model_label = f"{model._meta.app_label}.{model.__name__}"
+        scope_suffix = f" (scope={scope})" if scope is not None else ""
 
         if verbosity >= 1:
-            self.stdout.write(f"Rebuilding tree for {model_label}...")
+            self.stdout.write(f"Rebuilding tree for {model_label}{scope_suffix}...")
 
-        result = rebuild(model)
+        result = rebuild(model, scope=scope)
 
         if verbosity >= 1:
             self.stdout.write(
                 self.style.SUCCESS(
-                    f"{model_label}: Rebuilt. "
+                    f"{model_label}{scope_suffix}: Rebuilt. "
                     f"{result['nodes_updated']} node(s) updated, "
                     f"{result['nodes_unchanged']} unchanged."
                 )

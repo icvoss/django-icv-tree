@@ -7,6 +7,80 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [0.4.0] - 2026-08-05
+
+### Added
+
+- **Scoped rebuilds** (issue #7). `rebuild()` (and `TreeManager.rebuild()`,
+  and the `icv_tree_rebuild` management command) now accept an optional
+  `scope` argument. When given, the rebuild reads, clears, and writes only
+  the rows in that `tree_scope_field` value; every other scope's rows,
+  including their path, depth, and order, are left completely untouched.
+  This lets a scoped consumer (for example a vocabulary of terms) rebuild
+  the whole tree it owns without touching any other vocabulary's tree.
+
+  A scoped rebuild is safe from transient path collisions because a scoped
+  model's uniqueness constraint covers `(scope_field, path)`, not `path`
+  alone: the placeholder-clearing pass used during rebuild only ever
+  clears rows within the target scope, so it can never collide with a
+  real path belonging to a different, untouched scope.
+
+  Passing `scope` to a model that does not define `tree_scope_field` raises
+  `django.core.exceptions.ImproperlyConfigured`. `scope=None` (the
+  default) keeps the existing full-rebuild behaviour unchanged.
+
+  The PostgreSQL recursive-CTE fast path (`ICV_TREE_ENABLE_CTE = True`)
+  also supports `scope`: the scope filter is threaded straight into the
+  CTE's anchor (roots) query, so the fast path stays fast under scoping.
+
+  The `tree_rebuilt` signal now carries a `scope` keyword argument (the
+  value passed to `rebuild()`, or `None` for a full rebuild).
+
+  New `--scope` option on `icv_tree_rebuild`, for example:
+  `python manage.py icv_tree_rebuild --model=myapp.Term --scope=5`.
+
+- **`reorder_siblings(model, ordered_ids)`.** A new public mutation
+  primitive alongside `move_to`, for reordering a set of sibling rows
+  without a rebuild and without touching any sibling that is not listed.
+
+  `ordered_ids` names a set of rows that all share one parent (which may
+  be `None` for roots) and gives their desired final sequence. The rows
+  are permuted across the `(order, path)` slots they already occupy: the
+  current slots are collected and sorted ascending, then handed out to
+  the rows in the requested sequence. Any sibling of the same parent that
+  is not named in `ordered_ids`, including siblings interleaved between
+  the listed rows by order, is left completely untouched: its path,
+  depth, and order are byte-for-byte unchanged. Listing a strict subset
+  of a parent's children is fully supported, which is what lets a scoped
+  consumer reorder only the rows it owns within a shared sibling list
+  (for example a root sibling list spanning several `tree_scope_field`
+  values) without disturbing any other scope's roots.
+
+  This closes a gap the scoped `rebuild()` above could not: some
+  concrete-polymorphic multi-table-inheritance consumers keep their scope
+  column on a subclass table, so a scoped rebuild cannot serve their
+  sibling-reorder path at all. `reorder_siblings` avoids rebuilding
+  altogether, so it has no dependency on where the scope column lives.
+
+  Collision safety follows the same two-phase placeholder pattern
+  `move_to` already uses for the single node it moves, generalised to
+  every row in the permutation: an arbitrary permutation (unlike a
+  simple insert or remove, which only ever shifts a contiguous range by
+  one step) has no write order that is safe for every case, a 3-cycle
+  collides whether written ascending or descending in a single pass, and
+  neither does the simplest case of two siblings exchanging slots. Every
+  listed row (and its descendants) is first moved to a unique placeholder
+  path, then every row is written to its final path, so the unique path
+  constraint is never at risk mid-permutation.
+
+  Raises `TreeStructureError`, the same exception `move_to` raises for
+  its cycle guard, if `ordered_ids` is empty, contains a duplicate,
+  names an id that does not exist, or names rows that do not all share
+  one parent. Is a no-op if the requested sequence already matches the
+  current order. Does not emit a signal: `node_moved`'s payload (a
+  single node with an old and new parent) has no natural shape for a
+  multi-row permutation with no parent change.
+
 ## [0.3.1] - 2026-07-28
 
 ### Fixed

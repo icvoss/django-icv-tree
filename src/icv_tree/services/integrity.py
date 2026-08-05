@@ -8,10 +8,12 @@ and consistency verification.
 from __future__ import annotations
 
 import re
+import uuid
 from collections import deque
 from collections.abc import Iterator
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+from django.core.exceptions import ImproperlyConfigured
 from django.db import connection, transaction
 
 if TYPE_CHECKING:
@@ -33,6 +35,36 @@ def _compute_new_path(
     if parent_path is None:
         return step
     return parent_path + separator + step
+
+
+def _bind(value: Any) -> Any:
+    """Coerce a value to a DBAPI-safe bind parameter for a raw cursor.execute.
+
+    Re-implements the same helper from mutations.py (see its docstring for
+    the full rationale) to avoid a circular import; integrity.py must not
+    import from mutations.py. A ``uuid.UUID`` is not an accepted bind type
+    on every backend (SQLite's driver accepts only
+    str/int/float/bytes/None), so a UUID scope value must be stringified
+    before it reaches ``cursor.execute``.
+    """
+    if isinstance(value, uuid.UUID):
+        return value.hex
+    return value
+
+
+def _scope_fk_value(scope: Any, scope_field: str | None) -> Any:
+    """Return the raw FK value for a ``scope`` argument passed to rebuild().
+
+    ``scope`` may be a model instance (e.g. a ``Vocabulary``) or the raw FK
+    value (its primary key). Raw SQL (the CTE fast path) always needs the
+    raw FK value; the ORM-based paths accept either transparently via
+    ``qs.filter(**{scope_field: scope})``, so this helper exists solely for
+    the raw-SQL bind parameter.
+    """
+    if scope is None or scope_field is None:
+        return None
+    pk = getattr(scope, "pk", None)
+    return pk if pk is not None else scope
 
 
 def _traverse_breadth_first(
@@ -65,7 +97,32 @@ def _is_postgresql() -> bool:
     return connection.vendor == "postgresql"
 
 
-def _rebuild_cte(model: type) -> dict:
+def _validate_scope(model: type, scope: Any) -> str | None:
+    """Validate a ``scope`` argument against a model's ``tree_scope_field``.
+
+    Args:
+        model: A concrete TreeNode subclass.
+        scope: The scope value passed to rebuild(), or None.
+
+    Returns:
+        The model's ``tree_scope_field`` name, or None if the model is
+        unscoped (``tree_scope_field`` is None).
+
+    Raises:
+        ImproperlyConfigured: If scope is not None but the model does not
+            define ``tree_scope_field``.
+    """
+    scope_field = getattr(model, "tree_scope_field", None)
+    if scope is not None and scope_field is None:
+        raise ImproperlyConfigured(
+            f"{model.__name__} does not define tree_scope_field, so rebuild() "
+            "cannot be scoped. Pass scope=None, or set tree_scope_field on the "
+            "model to enable scoped rebuilds."
+        )
+    return scope_field
+
+
+def _rebuild_cte(model: type, scope: Any = None) -> dict:
     """PostgreSQL-only rebuild implementation using a recursive CTE.
 
     Only called when ICV_TREE_ENABLE_CTE = True and the database backend
@@ -77,6 +134,10 @@ def _rebuild_cte(model: type) -> dict:
 
     Args:
         model: A concrete TreeNode subclass.
+        scope: When given, restricts the rebuild to rows whose
+            ``tree_scope_field`` column equals this value. Rows in other
+            scopes are left completely untouched. Raises
+            ImproperlyConfigured if the model has no ``tree_scope_field``.
 
     Returns:
         Same dict shape as rebuild().
@@ -88,7 +149,7 @@ def _rebuild_cte(model: type) -> dict:
     step_length = get_setting("ICV_TREE_STEP_LENGTH", 4)
     batch_size = get_setting("ICV_TREE_REBUILD_BATCH_SIZE", 1000)
 
-    scope_field = getattr(model, "tree_scope_field", None)
+    scope_field = _validate_scope(model, scope)
 
     nodes_updated = 0
     nodes_unchanged = 0
@@ -106,6 +167,7 @@ def _rebuild_cte(model: type) -> dict:
 
         # When scoped, partition roots by scope FK column so each scope
         # gets independent path numbering starting at 0001.
+        scope_col = None
         if scope_field:
             scope_col = f"{scope_field}_id"
             assert _SQL_IDENT_RE.match(scope_col), f"Unexpected characters in scope column: {scope_col!r}"
@@ -113,6 +175,16 @@ def _rebuild_cte(model: type) -> dict:
             root_partition = f"PARTITION BY t.{quoted_scope}, t.parent_id"
         else:
             root_partition = "PARTITION BY t.parent_id"
+
+        # When a specific scope value is given, restrict the anchor member
+        # (roots) to that scope. The recursive member only ever joins
+        # children of rows already in the CTE, so it never crosses into
+        # another scope's subtree, meaning no extra filter is needed there.
+        anchor_where = "t.parent_id IS NULL"
+        sql_params: list = []
+        if scope is not None and scope_col is not None:
+            anchor_where += f" AND t.{quoted_scope} = %s"
+            sql_params.append(_bind(_scope_fk_value(scope, scope_field)))
 
         raw_sql = f"""
             WITH RECURSIVE tree AS (
@@ -126,7 +198,7 @@ def _rebuild_cte(model: type) -> dict:
                     NULL::text AS parent_path,
                     0 AS computed_depth
                 FROM {quoted_table} t
-                WHERE t.parent_id IS NULL
+                WHERE {anchor_where}
                 UNION ALL
                 SELECT
                     child.{quoted_pk},
@@ -156,15 +228,15 @@ def _rebuild_cte(model: type) -> dict:
             )
             SELECT {quoted_pk}, sib_order, computed_path, computed_depth
             FROM tree_with_path
-        """  # noqa: S608 — internal query, identifiers from Django model registry
+        """  # noqa: S608 (internal query, identifiers from Django model registry)
 
         with connection.cursor() as cursor:
-            cursor.execute(raw_sql)
+            cursor.execute(raw_sql, sql_params)
             rows = cursor.fetchall()
 
         pk_to_computed: dict = {row[0]: (int(row[1]), row[2], int(row[3])) for row in rows}
 
-        all_nodes = list(_unfiltered_qs(model))
+        all_nodes = list(_unfiltered_qs(model, scope_field=scope_field, scope=scope))
         to_update = []
         for node in all_nodes:
             computed = pk_to_computed.get(node.pk)
@@ -183,9 +255,11 @@ def _rebuild_cte(model: type) -> dict:
         if to_update:
             # Clear paths to PK-based placeholders first to avoid
             # transient unique constraint violations during bulk_update.
-            _clear_paths_to_placeholders(model, batch_size)
+            # Restricted to the target scope so other scopes' rows (and
+            # their real paths) are never touched.
+            _clear_paths_to_placeholders(model, batch_size, scope_field=scope_field, scope=scope)
 
-            qs = _unfiltered_qs(model)
+            qs = _unfiltered_qs(model, scope_field=scope_field, scope=scope)
             for i in range(0, len(to_update), batch_size):
                 qs.bulk_update(
                     to_update[i : i + batch_size],
@@ -199,31 +273,53 @@ def _rebuild_cte(model: type) -> dict:
             sender=model,
             nodes_updated=nodes_updated,
             nodes_unchanged=nodes_unchanged,
+            scope=scope,
         )
 
     transaction.on_commit(_emit)
     return result
 
 
-def _unfiltered_qs(model: type):  # type: ignore[no-untyped-def]
+def _unfiltered_qs(model: type, scope_field: str | None = None, scope: Any = None):  # type: ignore[no-untyped-def]
     """Return a QuerySet that bypasses any manager-level filters (e.g. soft-delete).
 
     Checks for ``all_objects`` (icv-taxonomy convention) first, then falls
     back to ``_default_manager``.  As a last resort, constructs a raw
-    QuerySet directly from the model — guaranteed unfiltered.
+    QuerySet directly from the model, which is guaranteed unfiltered.
+
+    Args:
+        model: A concrete TreeNode subclass.
+        scope_field: When given (together with ``scope``), the returned
+            queryset is additionally filtered to rows whose scope FK
+            equals ``scope``. Rows in other scopes are excluded entirely,
+            so callers that write through this queryset (bulk_update,
+            update()) never touch another scope's rows.
+        scope: The scope value to filter to. Ignored if ``scope_field`` is
+            None.
     """
-    # Prefer all_objects (TreeManager on Term — no is_active filter).
+    # Prefer all_objects (TreeManager on Term, no is_active filter).
     mgr = getattr(model, "all_objects", None)
     if mgr is not None:
-        return mgr.all()
-    # Fallback: construct a bare QuerySet (no manager filters).
-    from django.db.models import QuerySet
+        qs = mgr.all()
+    else:
+        # Fallback: construct a bare QuerySet (no manager filters).
+        from django.db.models import QuerySet
 
-    return QuerySet(model)
+        qs = QuerySet(model)
+
+    if scope_field is not None and scope is not None:
+        qs = qs.filter(**{scope_field: scope})
+
+    return qs
 
 
-def _clear_paths_to_placeholders(model: type, batch_size: int) -> None:
-    """Set all paths to unique PK-based placeholders to avoid transient collisions.
+def _clear_paths_to_placeholders(
+    model: type,
+    batch_size: int,
+    scope_field: str | None = None,
+    scope: Any = None,
+) -> None:
+    """Set paths to unique PK-based placeholders to avoid transient collisions.
 
     During rebuild, ``bulk_update`` writes new path values while old paths
     still exist in the table. When a unique constraint covers the path
@@ -235,11 +331,24 @@ def _clear_paths_to_placeholders(model: type, batch_size: int) -> None:
     Uses a single UPDATE ... SET path = '__rebuild_' || pk || '__' so the
     operation is fast even for large tables, and does NOT mutate in-memory
     node objects.
+
+    Args:
+        model: A concrete TreeNode subclass.
+        batch_size: Unused here (kept for signature symmetry with callers);
+            the placeholder clear is a single UPDATE regardless of table size.
+        scope_field: When given (together with ``scope``), only rows in
+            that scope are cleared. Rows in other scopes keep their real
+            paths untouched, which is safe because the uniqueness
+            constraint on a scoped model covers ``(scope_field, path)``,
+            not ``path`` alone. A placeholder in one scope can therefore
+            never collide with a real path in a different scope.
+        scope: The scope value to restrict clearing to. Ignored if
+            ``scope_field`` is None.
     """
     from django.db.models import CharField, Value
     from django.db.models.functions import Cast, Concat
 
-    _unfiltered_qs(model).update(
+    _unfiltered_qs(model, scope_field=scope_field, scope=scope).update(
         path=Concat(Value("__rebuild_"), Cast("pk", CharField()), Value("__")),
     )
 
@@ -319,8 +428,8 @@ def _rebuild_scoped(  # noqa: C901
     return to_update, nodes_updated, nodes_unchanged
 
 
-def rebuild(model: type) -> dict:
-    """Reconstruct path, depth, and order for all nodes from the parent FK.
+def rebuild(model: type, scope: Any = None) -> dict:
+    """Reconstruct path, depth, and order for nodes from the parent FK.
 
     When the model defines ``tree_scope_field``, roots are grouped by scope
     value and path numbering restarts at 0001 for each scope. This prevents
@@ -328,17 +437,31 @@ def rebuild(model: type) -> dict:
 
     Args:
         model: A concrete TreeNode subclass (e.g., Page).
+        scope: When given, restricts the rebuild to rows whose
+            ``tree_scope_field`` column equals this value. The node load,
+            the placeholder-clearing pass, and the bulk updates are all
+            restricted to that scope; rows in every other scope are left
+            completely untouched (their path, depth, and order are never
+            read for writing, let alone changed). Because children of a
+            scoped node always share their parent's scope, restricting the
+            initial node load to the target scope is sufficient to keep
+            the whole BFS traversal inside that scope. Defaults to None,
+            which rebuilds every row exactly as before.
 
     Returns:
         Dict with keys:
           - nodes_updated: int
           - nodes_unchanged: int
 
+    Raises:
+        ImproperlyConfigured: If scope is not None but the model does not
+            define ``tree_scope_field``.
+
     Side effects:
-        - Reads all nodes via BFS traversal
+        - Reads nodes (all, or just the target scope) via BFS traversal
         - bulk_update() in batches
         - Wrapped in transaction.atomic()
-        - Emits tree_rebuilt signal after commit
+        - Emits tree_rebuilt signal (carrying scope) after commit
     """
     from ..conf import get_setting
 
@@ -347,16 +470,18 @@ def rebuild(model: type) -> dict:
     batch_size = get_setting("ICV_TREE_REBUILD_BATCH_SIZE", 1000)
     enable_cte = get_setting("ICV_TREE_ENABLE_CTE", False)
 
-    scope_field = getattr(model, "tree_scope_field", None)
+    scope_field = _validate_scope(model, scope)
 
     if enable_cte and _is_postgresql():
-        return _rebuild_cte(model)
+        return _rebuild_cte(model, scope=scope)
 
     with transaction.atomic():
         # Use unfiltered queryset to include inactive/soft-deleted rows.
-        qs = _unfiltered_qs(model)
+        # When scope is given, this also excludes every other scope's rows
+        # from the load entirely, so the BFS below never sees them.
+        qs = _unfiltered_qs(model, scope_field=scope_field, scope=scope)
 
-        # Load all nodes grouped by parent for BFS.
+        # Load nodes grouped by parent for BFS.
         parent_to_children: dict = {}
         all_nodes: list = []
         for node in qs.order_by("parent_id", "order"):
@@ -375,9 +500,11 @@ def rebuild(model: type) -> dict:
         )
 
         if to_update:
-            # Clear ALL paths to PK-based placeholders first to avoid
+            # Clear paths to PK-based placeholders first to avoid
             # transient unique constraint violations during bulk_update.
-            _clear_paths_to_placeholders(model, batch_size)
+            # Restricted to the target scope so other scopes' rows (and
+            # their real paths) are never touched.
+            _clear_paths_to_placeholders(model, batch_size, scope_field=scope_field, scope=scope)
 
             # Now write the final computed paths.
             for i in range(0, len(to_update), batch_size):
@@ -395,6 +522,7 @@ def rebuild(model: type) -> dict:
             sender=model,
             nodes_updated=nodes_updated,
             nodes_unchanged=nodes_unchanged,
+            scope=scope,
         )
 
     transaction.on_commit(_emit)

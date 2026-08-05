@@ -258,7 +258,7 @@ class TestRebuild:
         assert len(received) == 1
 
     def test_tree_rebuilt_signal_carries_correct_kwargs(self, tree_nodes, simple_tree_model, mocker):
-        """tree_rebuilt signal should carry nodes_updated and nodes_unchanged."""
+        """tree_rebuilt signal should carry nodes_updated, nodes_unchanged, and scope."""
         from icv_tree.signals import tree_rebuilt
 
         mocker.patch(
@@ -271,8 +271,8 @@ class TestRebuild:
 
         received = []
 
-        def handler(sender, nodes_updated, nodes_unchanged, **kwargs):  # type: ignore[no-untyped-def]
-            received.append({"nodes_updated": nodes_updated, "nodes_unchanged": nodes_unchanged})
+        def handler(sender, nodes_updated, nodes_unchanged, scope, **kwargs):  # type: ignore[no-untyped-def]
+            received.append({"nodes_updated": nodes_updated, "nodes_unchanged": nodes_unchanged, "scope": scope})
 
         tree_rebuilt.connect(handler)
         try:
@@ -282,6 +282,9 @@ class TestRebuild:
 
         assert len(received) == 1
         assert received[0]["nodes_updated"] >= 1
+        # A default (unscoped) rebuild always carries scope=None, even for
+        # a model that could in principle be scoped elsewhere.
+        assert received[0]["scope"] is None
 
 
 @pytest.mark.django_db

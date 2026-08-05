@@ -229,6 +229,50 @@ class TestIcvTreeRebuildCommand:
 
 
 @pytest.mark.django_db
+class TestIcvTreeRebuildScopeOption:
+    """--scope flag restricts the rebuild to one tree_scope_field value."""
+
+    def test_scope_on_unscoped_model_raises_command_error(self):
+        """--scope on a model without tree_scope_field should raise CommandError."""
+        with pytest.raises(CommandError, match="tree_scope_field"):
+            call_command("icv_tree_rebuild", model="tree_testapp.SimpleTree", scope="1", verbosity=0)
+
+    def test_scope_restricts_rebuild_to_target_scope(self):
+        """--scope=<id> should repair only that scope, leaving others untouched."""
+        from tree_testapp.models import Scope, ScopedTree
+
+        s1 = Scope.objects.create(name="Scope A")
+        s2 = Scope.objects.create(name="Scope B")
+        a1 = ScopedTree.objects.create(name="A-1", scope=s1)
+        b1 = ScopedTree.objects.create(name="B-1", scope=s2)
+
+        ScopedTree.objects.filter(pk=a1.pk).update(path=f"CORRUPT_{a1.pk}", depth=99, order=99)
+        ScopedTree.objects.filter(pk=b1.pk).update(path=f"CORRUPT_{b1.pk}", depth=99, order=99)
+
+        call_command("icv_tree_rebuild", model="tree_testapp.ScopedTree", scope=str(s1.pk), verbosity=0)
+
+        a1.refresh_from_db()
+        b1.refresh_from_db()
+        assert a1.path == "0001"
+        # Scope B was never named on the command line, so it must be left
+        # exactly as corrupted.
+        assert b1.path == f"CORRUPT_{b1.pk}"
+        assert b1.depth == 99
+        assert b1.order == 99
+
+    def test_scope_outputs_scope_in_summary(self, capsys):
+        """Verbose output should mention the scope the rebuild was restricted to."""
+        from tree_testapp.models import Scope, ScopedTree
+
+        s1 = Scope.objects.create(name="Scope A")
+        ScopedTree.objects.create(name="A-1", scope=s1)
+
+        call_command("icv_tree_rebuild", model="tree_testapp.ScopedTree", scope=str(s1.pk), verbosity=1)
+        captured = capsys.readouterr()
+        assert str(s1.pk) in captured.out
+
+
+@pytest.mark.django_db
 class TestIcvTreeRebuildDryRun:
     """--dry-run flag reports without modifying data."""
 

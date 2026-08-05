@@ -129,6 +129,38 @@ emitted after commit.
 
 Cycle detection prevents moving a node under its own descendant.
 
+### Reordering a subset of siblings
+
+`move_to` changes how many slots a sibling list has (it inserts into, or
+removes a node from, the list). For the common case of reordering rows that
+already share a parent, `reorder_siblings` is a narrower, cheaper primitive
+that never adds or removes a slot:
+
+```python
+from icv_tree.services import reorder_siblings
+
+reorder_siblings(Category, ordered_ids=[c3.pk, c1.pk, c2.pk])
+```
+
+`ordered_ids` names a set of sibling rows (they must all share one parent,
+which may be `None` for roots) and gives the sequence you want them in. The
+listed rows are permuted across the `(order, path)` slots they already
+occupy: the current slots are collected and sorted, then handed out to the
+rows in the order you gave. Every sibling that is not listed, including
+other siblings of the same parent interleaved between the listed ones, is
+left completely untouched, its path, depth, and order are byte-for-byte
+unchanged.
+
+This is what lets a consumer reorder only the rows it owns within a shared
+sibling list, for example a root sibling list that spans several
+`tree_scope_field` values, without touching any other scope's roots and
+without a rebuild.
+
+`reorder_siblings` is atomic, raises `TreeStructureError` for an empty or
+duplicate id list, an unknown id, or ids that do not all share one parent,
+and does not emit a signal (there is no single-node shape for a multi-row
+permutation).
+
 ---
 
 ## Rebuilding
@@ -145,9 +177,32 @@ python manage.py icv_tree_rebuild --model=myapp.Category
 Options:
 - `--dry-run`: report what would change without writing
 - `--check`: run integrity checks only, exit 1 if issues found
+- `--scope`: restrict the rebuild to one `tree_scope_field` value (see below)
 
 On PostgreSQL with `ICV_TREE_ENABLE_CTE = True`, rebuild uses a recursive CTE
 for better performance on large trees.
+
+### Scoped rebuilds
+
+For a model that sets `tree_scope_field` (see `TreeNode`'s docstring for the
+full path-scoping contract), a full rebuild reconstructs every scope in one
+pass. To rebuild just one scope's tree, pass `scope=`:
+
+```python
+Term.objects.rebuild(scope=vocabulary)
+# or
+python manage.py icv_tree_rebuild --model=myapp.Term --scope=5
+```
+
+A scoped rebuild only reads, clears, and writes rows in the given scope.
+Every other scope's rows, including their path, depth, and order, are left
+completely untouched. This is safe because a scoped model's uniqueness
+constraint covers `(scope_field, path)`, not `path` alone, so a scoped
+rebuild's transient placeholder values can never collide with another
+scope's real paths.
+
+Passing `scope` to a model that does not define `tree_scope_field` raises
+`ImproperlyConfigured`.
 
 ---
 
@@ -185,7 +240,8 @@ def on_move(sender, instance, old_parent, new_parent, old_path, **kwargs):
     pass
 
 @receiver(tree_rebuilt)
-def on_rebuild(sender, nodes_updated, nodes_unchanged, **kwargs):
+def on_rebuild(sender, nodes_updated, nodes_unchanged, scope, **kwargs):
+    # scope is the value rebuild() was restricted to, or None for a full rebuild.
     pass
 ```
 

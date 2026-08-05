@@ -186,3 +186,183 @@ class TestUnscopedBackwardsCompatibility:
         """Rebuild on an unscoped model should work unchanged."""
         result = rebuild(simple_tree_model)
         assert result["nodes_updated"] == 0 or result["nodes_unchanged"] > 0
+
+
+@pytest.mark.django_db
+class TestRebuildScopeParameter:
+    """Test rebuild(model, scope=...), issue #7.
+
+    A scoped rebuild must repair only the target scope's tree, leaving
+    every other scope's rows byte-identical (path, depth, and order all
+    untouched), and must reject a scope argument on an unscoped model.
+    """
+
+    def test_scoped_rebuild_fixes_only_target_scope(self, two_scopes, scoped_tree_model):
+        """rebuild(scope=s1) should repair only scope A's corrupted nodes."""
+        s1, s2 = two_scopes
+        a1 = scoped_tree_model.objects.create(name="A-1", scope=s1)
+        a2 = scoped_tree_model.objects.create(name="A-2", scope=s1)
+        b1 = scoped_tree_model.objects.create(name="B-1", scope=s2)
+        b2 = scoped_tree_model.objects.create(name="B-2", scope=s2)
+
+        for node in scoped_tree_model.objects.all():
+            scoped_tree_model.objects.filter(pk=node.pk).update(
+                path=f"CORRUPT_{node.pk}",
+                depth=99,
+                order=99,
+            )
+
+        result = rebuild(scoped_tree_model, scope=s1)
+        assert result["nodes_updated"] == 2
+
+        a1.refresh_from_db()
+        a2.refresh_from_db()
+        scope_a_paths = sorted([a1.path, a2.path])
+        assert scope_a_paths == ["0001", "0002"]
+        assert a1.depth == 0
+        assert a2.depth == 0
+
+        # Scope B was corrupted too, but not passed to rebuild(): its rows
+        # must be byte-identical to the corrupted values, untouched.
+        b1.refresh_from_db()
+        b2.refresh_from_db()
+        assert b1.path == f"CORRUPT_{b1.pk}"
+        assert b1.depth == 99
+        assert b1.order == 99
+        assert b2.path == f"CORRUPT_{b2.pk}"
+        assert b2.depth == 99
+        assert b2.order == 99
+
+    def test_scoped_rebuild_leaves_other_scope_byte_identical_with_hierarchy(self, two_scopes, scoped_tree_model):
+        """A scoped rebuild must not touch another scope's hierarchy, at all."""
+        s1, s2 = two_scopes
+        a_root = scoped_tree_model.objects.create(name="A-root", scope=s1)
+        scoped_tree_model.objects.create(name="A-child", scope=s1, parent=a_root)
+        b_root = scoped_tree_model.objects.create(name="B-root", scope=s2)
+        b_child = scoped_tree_model.objects.create(name="B-child", scope=s2, parent=b_root)
+
+        # Snapshot scope B's fields before the scoped rebuild runs.
+        b_root_before = (b_root.path, b_root.depth, b_root.order)
+        b_child_before = (b_child.path, b_child.depth, b_child.order)
+
+        # Corrupt every row (both scopes) so a leaked write would be visible.
+        for node in scoped_tree_model.objects.all():
+            scoped_tree_model.objects.filter(pk=node.pk).update(
+                path=f"CORRUPT_{node.pk}",
+                depth=99,
+                order=99,
+            )
+
+        rebuild(scoped_tree_model, scope=s1)
+
+        b_root.refresh_from_db()
+        b_child.refresh_from_db()
+        # Scope B was corrupted above and never repaired: its fields must
+        # still match the corrupted snapshot, not the pre-corruption values,
+        # proving the scoped rebuild never wrote to scope B at all.
+        assert (b_root.path, b_root.depth, b_root.order) == (f"CORRUPT_{b_root.pk}", 99, 99)
+        assert (b_child.path, b_child.depth, b_child.order) == (f"CORRUPT_{b_child.pk}", 99, 99)
+        assert (b_root.path, b_root.depth, b_root.order) != b_root_before
+        assert (b_child.path, b_child.depth, b_child.order) != b_child_before
+
+    def test_scoped_rebuild_is_collision_safe_with_shared_paths(self, two_scopes, scoped_tree_model):
+        """Rebuilding scope A must not collide with scope B's identical, untouched paths.
+
+        Regression for the uniqueness-constraint interaction: ScopedTree's
+        constraint is (scope, path), not path alone, so scope A's transient
+        placeholder values during rebuild can never collide with scope B's
+        real, untouched path '0001'.
+        """
+        s1, s2 = two_scopes
+        a1 = scoped_tree_model.objects.create(name="A-1", scope=s1)
+        b1 = scoped_tree_model.objects.create(name="B-1", scope=s2)
+        assert a1.path == b1.path == "0001"
+
+        scoped_tree_model.objects.filter(pk=a1.pk).update(path=f"CORRUPT_{a1.pk}", depth=99, order=99)
+
+        # Must not raise IntegrityError even though scope B already holds path '0001'.
+        result = rebuild(scoped_tree_model, scope=s1)
+        assert result["nodes_updated"] == 1
+
+        a1.refresh_from_db()
+        b1.refresh_from_db()
+        assert a1.path == "0001"
+        assert b1.path == "0001"
+
+    def test_scoped_rebuild_on_unscoped_model_raises(self, tree_nodes, simple_tree_model):
+        """Passing scope= to a model without tree_scope_field must raise."""
+        from django.core.exceptions import ImproperlyConfigured
+
+        with pytest.raises(ImproperlyConfigured, match="tree_scope_field"):
+            rebuild(simple_tree_model, scope="anything")
+
+    def test_default_full_rebuild_unchanged(self, two_scopes, scoped_tree_model):
+        """rebuild() with no scope argument must still repair every scope."""
+        s1, s2 = two_scopes
+        a1 = scoped_tree_model.objects.create(name="A-1", scope=s1)
+        b1 = scoped_tree_model.objects.create(name="B-1", scope=s2)
+
+        for node in scoped_tree_model.objects.all():
+            scoped_tree_model.objects.filter(pk=node.pk).update(
+                path=f"CORRUPT_{node.pk}",
+                depth=99,
+                order=99,
+            )
+
+        result = rebuild(scoped_tree_model)
+        assert result["nodes_updated"] == 2
+
+        a1.refresh_from_db()
+        b1.refresh_from_db()
+        assert a1.path == "0001"
+        assert b1.path == "0001"
+
+    def test_scoped_rebuild_signal_carries_scope(self, two_scopes, scoped_tree_model, mocker):
+        """tree_rebuilt should carry the scope value the rebuild was restricted to."""
+        from icv_tree.signals import tree_rebuilt
+
+        mocker.patch(
+            "icv_tree.services.integrity.transaction.on_commit",
+            side_effect=lambda fn: fn(),
+        )
+
+        s1, s2 = two_scopes
+        scoped_tree_model.objects.create(name="A-1", scope=s1)
+        scoped_tree_model.objects.filter(scope=s1).update(path="CORRUPT", depth=99, order=99)
+
+        received = []
+
+        def handler(sender, scope, **kwargs):  # type: ignore[no-untyped-def]
+            received.append(scope)
+
+        tree_rebuilt.connect(handler)
+        try:
+            rebuild(scoped_tree_model, scope=s1)
+        finally:
+            tree_rebuilt.disconnect(handler)
+
+        assert len(received) == 1
+        assert received[0] == s1
+
+    def test_full_rebuild_signal_scope_is_none(self, tree_nodes, simple_tree_model, mocker):
+        """tree_rebuilt should carry scope=None for a default, unscoped rebuild."""
+        from icv_tree.signals import tree_rebuilt
+
+        mocker.patch(
+            "icv_tree.services.integrity.transaction.on_commit",
+            side_effect=lambda fn: fn(),
+        )
+
+        received = []
+
+        def handler(sender, scope, **kwargs):  # type: ignore[no-untyped-def]
+            received.append(scope)
+
+        tree_rebuilt.connect(handler)
+        try:
+            simple_tree_model.objects.rebuild()
+        finally:
+            tree_rebuilt.disconnect(handler)
+
+        assert len(received) == 1
+        assert received[0] is None
