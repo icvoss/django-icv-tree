@@ -7,6 +7,38 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [0.4.0] - 2026-08-05
+
+### Added
+
+- **Scoped rebuilds** (issue #7). `rebuild()` (and `TreeManager.rebuild()`,
+  and the `icv_tree_rebuild` management command) now accept an optional
+  `scope` argument. When given, the rebuild reads, clears, and writes only
+  the rows in that `tree_scope_field` value; every other scope's rows,
+  including their path, depth, and order, are left completely untouched.
+  This lets a scoped consumer (for example a vocabulary of terms) rebuild
+  the whole tree it owns without touching any other vocabulary's tree.
+
+  A scoped rebuild is safe from transient path collisions because a scoped
+  model's uniqueness constraint covers `(scope_field, path)`, not `path`
+  alone: the placeholder-clearing pass used during rebuild only ever
+  clears rows within the target scope, so it can never collide with a
+  real path belonging to a different, untouched scope.
+
+  Passing `scope` to a model that does not define `tree_scope_field` raises
+  `django.core.exceptions.ImproperlyConfigured`. `scope=None` (the
+  default) keeps the existing full-rebuild behaviour unchanged.
+
+  The PostgreSQL recursive-CTE fast path (`ICV_TREE_ENABLE_CTE = True`)
+  also supports `scope`: the scope filter is threaded straight into the
+  CTE's anchor (roots) query, so the fast path stays fast under scoping.
+
+  The `tree_rebuilt` signal now carries a `scope` keyword argument (the
+  value passed to `rebuild()`, or `None` for a full rebuild).
+
+  New `--scope` option on `icv_tree_rebuild`, for example:
+  `python manage.py icv_tree_rebuild --model=myapp.Term --scope=5`.
+
 ## [0.3.1] - 2026-07-28
 
 ### Fixed
