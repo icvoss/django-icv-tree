@@ -145,9 +145,32 @@ python manage.py icv_tree_rebuild --model=myapp.Category
 Options:
 - `--dry-run`: report what would change without writing
 - `--check`: run integrity checks only, exit 1 if issues found
+- `--scope`: restrict the rebuild to one `tree_scope_field` value (see below)
 
 On PostgreSQL with `ICV_TREE_ENABLE_CTE = True`, rebuild uses a recursive CTE
 for better performance on large trees.
+
+### Scoped rebuilds
+
+For a model that sets `tree_scope_field` (see `TreeNode`'s docstring for the
+full path-scoping contract), a full rebuild reconstructs every scope in one
+pass. To rebuild just one scope's tree, pass `scope=`:
+
+```python
+Term.objects.rebuild(scope=vocabulary)
+# or
+python manage.py icv_tree_rebuild --model=myapp.Term --scope=5
+```
+
+A scoped rebuild only reads, clears, and writes rows in the given scope.
+Every other scope's rows, including their path, depth, and order, are left
+completely untouched. This is safe because a scoped model's uniqueness
+constraint covers `(scope_field, path)`, not `path` alone, so a scoped
+rebuild's transient placeholder values can never collide with another
+scope's real paths.
+
+Passing `scope` to a model that does not define `tree_scope_field` raises
+`ImproperlyConfigured`.
 
 ---
 
@@ -185,7 +208,8 @@ def on_move(sender, instance, old_parent, new_parent, old_path, **kwargs):
     pass
 
 @receiver(tree_rebuilt)
-def on_rebuild(sender, nodes_updated, nodes_unchanged, **kwargs):
+def on_rebuild(sender, nodes_updated, nodes_unchanged, scope, **kwargs):
+    # scope is the value rebuild() was restricted to, or None for a full rebuild.
     pass
 ```
 

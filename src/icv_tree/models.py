@@ -146,8 +146,15 @@ class TreeManager(models.Manager):
         """
         return self.get_queryset().filter(depth=depth).order_by("path")
 
-    def rebuild(self) -> dict:
-        """Rebuild all path, depth, and order values from the parent FK adjacency list.
+    def rebuild(self, scope=None) -> dict:  # type: ignore[no-untyped-def]
+        """Rebuild path, depth, and order values from the parent FK adjacency list.
+
+        Args:
+            scope: When given, restricts the rebuild to rows whose
+                ``tree_scope_field`` column equals this value; every other
+                scope's rows are left untouched. Raises
+                ImproperlyConfigured if the model has no
+                ``tree_scope_field``. Defaults to None (rebuild everything).
 
         Returns:
             Dict with keys:
@@ -155,11 +162,11 @@ class TreeManager(models.Manager):
               - nodes_unchanged: int
 
         Side effects:
-            Emits tree_rebuilt signal after commit.
+            Emits tree_rebuilt signal (carrying scope) after commit.
         """
         from .services import rebuild
 
-        return rebuild(self.model)
+        return rebuild(self.model, scope=scope)
 
     # Expose TreeQuerySet methods directly on the manager for convenience.
 
@@ -233,6 +240,15 @@ class TreeNode(models.Model):
       counts and path numbering within each scope value, preventing
       cross-scope path collisions. You must also add a composite unique
       constraint on (scope_field, path) in your model's Meta.
+
+      By default, rebuild() reconstructs every scope's rows in one pass.
+      To rebuild a single scope's tree without touching any other scope,
+      pass ``scope=<value>``::
+
+          Term.objects.rebuild(scope=vocabulary)
+
+      Passing ``scope`` on a model that has no ``tree_scope_field`` raises
+      ImproperlyConfigured.
     """
 
     #: Set to the name of a FK field to scope paths independently per value.

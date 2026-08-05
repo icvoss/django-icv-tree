@@ -11,17 +11,19 @@ from django.dispatch import Signal
 # Emitted after a node (and its subtree) has been moved to a new position.
 #
 # Keyword arguments:
-#   sender      — The concrete model class (e.g., Page)
-#   instance    — The TreeNode instance after the move (new path/parent set)
-#   old_parent  — The parent TreeNode (or None) before the move
-#   new_parent  — The parent TreeNode (or None) after the move
-#   old_path    — str, the node's path value before the move
+#   sender      : The concrete model class (e.g., Page)
+#   instance    : The TreeNode instance after the move (new path/parent set)
+#   old_parent  : The parent TreeNode (or None) before the move
+#   new_parent  : The parent TreeNode (or None) after the move
+#   old_path    : str, the node's path value before the move
 node_moved = Signal()
 
-# Emitted after a full rebuild() completes.
+# Emitted after a rebuild() completes.
 #
 # Keyword arguments:
-#   sender          — The concrete model class (e.g., Page)
-#   nodes_updated   — int, count of nodes whose path/depth/order was changed
-#   nodes_unchanged — int, count of nodes already consistent
+#   sender          : The concrete model class (e.g., Page)
+#   nodes_updated   : int, count of nodes whose path/depth/order was changed
+#   nodes_unchanged : int, count of nodes already consistent
+#   scope           : The scope value the rebuild was restricted to, or
+#                      None for a full (unscoped or all-scopes) rebuild
 tree_rebuilt = Signal()
