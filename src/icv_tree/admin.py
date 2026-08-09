@@ -78,14 +78,19 @@ class TreeAdmin:
         )
         custom_urls = [
             path(
-                "<int:pk>/tree-move/",
+                # <path:pk>, not <int:pk>: matches Django's own ModelAdmin
+                # convention (get_urls() uses <path:object_id> for change/
+                # delete/history) so this endpoint accepts any pk type a
+                # Django model lookup supports, UUID included. <int:pk>
+                # 404s before the view is even reached for a UUID-pk model.
+                "<path:pk>/tree-move/",
                 self.admin_site.admin_view(self.tree_move_node),  # type: ignore[attr-defined]
                 name=f"{model_info[0]}_{model_info[1]}_tree_move",
             ),
         ]
         return custom_urls + urls
 
-    def tree_move_node(self, request, pk: int):  # type: ignore[no-untyped-def]
+    def tree_move_node(self, request, pk: str):  # type: ignore[no-untyped-def]
         """AJAX endpoint for drag-drop node reordering.
 
         Expects POST with target_id and position (first-child, last-child,

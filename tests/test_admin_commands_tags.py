@@ -177,6 +177,117 @@ class TestTreeAdminGetReadonlyFields:
         assert "order" in fields
 
 
+@pytest.mark.django_db
+class TestTreeAdminMoveEndpointUUIDPrimaryKey:
+    """Regression tests for #6: tree_move_node must work with UUID pks.
+
+    ``get_urls()`` registered the endpoint at ``<int:pk>/tree-move/``, so a
+    UUID-formatted pk in the URL 404s before ``tree_move_node`` is ever
+    reached. Fixed to ``<path:pk>/tree-move/``, matching Django's own
+    ``ModelAdmin.get_urls()`` convention for change/delete/history.
+    """
+
+    def _make_admin(self):
+        from django.contrib import admin
+        from tree_testapp.models import UUIDTree
+
+        from icv_tree.admin import TreeAdmin
+
+        class UUIDTreeAdmin(TreeAdmin, admin.ModelAdmin):
+            pass
+
+        return UUIDTreeAdmin(UUIDTree, AdminSite())
+
+    def test_move_url_pattern_matches_a_uuid_formatted_pk(self):
+        """The registered URL pattern must resolve a UUID-shaped path segment.
+
+        <int:pk> never matches a UUID string (dashes, hex letters); only a
+        route using <path:pk> (or an equally permissive converter) does.
+        """
+        import uuid
+
+        admin_instance = self._make_admin()
+        urls = admin_instance.get_urls()
+        move_url = next(u for u in urls if "tree-move" in str(u.pattern))
+
+        sample_uuid = str(uuid.uuid4())
+        match = move_url.pattern.match(f"{sample_uuid}/tree-move/")
+        assert match is not None
+        _remainder, _args, kwargs = match
+        assert kwargs["pk"] == sample_uuid
+
+    def test_move_url_pattern_still_matches_an_integer_pk(self):
+        """Integer-pk projects must remain compatible after the converter change."""
+        admin_instance = self._make_admin()
+        urls = admin_instance.get_urls()
+        move_url = next(u for u in urls if "tree-move" in str(u.pattern))
+
+        match = move_url.pattern.match("42/tree-move/")
+        assert match is not None
+        _remainder, _args, kwargs = match
+        assert kwargs["pk"] == "42"
+
+    def test_move_url_pattern_rejects_an_unrelated_path_shape(self):
+        """A genuinely invalid identifier segment must still not match at all."""
+        admin_instance = self._make_admin()
+        urls = admin_instance.get_urls()
+        move_url = next(u for u in urls if "tree-move" in str(u.pattern))
+
+        # No trailing /tree-move/ segment at all: must not match.
+        assert move_url.pattern.match("not-a-real-route") is None
+
+    def test_tree_move_node_moves_a_uuid_pk_node(self):
+        """The view itself must accept a UUID pk (as a string, matching the
+        URL kwarg type) and successfully move the node."""
+        from tree_testapp.models import UUIDTree
+
+        admin_instance = self._make_admin()
+        root = UUIDTree.objects.create(name="root")
+        first_child = UUIDTree.objects.create(name="first", parent=root)
+        second_child = UUIDTree.objects.create(name="second", parent=root)
+
+        rf = RequestFactory()
+        request = rf.post(
+            "/admin/tree_testapp/uuidtree/x/tree-move/",
+            data={"target_id": str(first_child.pk), "position": "right"},
+        )
+        request.user = _make_superuser("move_user_uuid")
+
+        response = admin_instance.tree_move_node(request, str(second_child.pk))
+
+        assert response.status_code == 200
+        import json
+
+        payload = json.loads(response.content)
+        assert payload["status"] == "ok"
+
+        second_child.refresh_from_db()
+        first_child.refresh_from_db()
+        assert second_child.order > first_child.order
+
+    def test_tree_move_node_404s_for_a_genuinely_missing_uuid(self):
+        """A well-formed but non-existent UUID pk must still 404 cleanly,
+        not raise an unhandled exception."""
+        import uuid
+
+        from tree_testapp.models import UUIDTree
+
+        admin_instance = self._make_admin()
+        target = UUIDTree.objects.create(name="target")
+
+        rf = RequestFactory()
+        request = rf.post(
+            "/admin/tree_testapp/uuidtree/x/tree-move/",
+            data={"target_id": str(target.pk), "position": "right"},
+        )
+        request.user = _make_superuser("move_user_missing")
+
+        missing_pk = str(uuid.uuid4())
+        response = admin_instance.tree_move_node(request, missing_pk)
+
+        assert response.status_code == 404
+
+
 # ---------------------------------------------------------------------------
 # Management command — icv_tree_rebuild
 # ---------------------------------------------------------------------------
