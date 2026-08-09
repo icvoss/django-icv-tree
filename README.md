@@ -263,7 +263,12 @@ class CategoryAdmin(TreeAdmin, admin.ModelAdmin):
 `TreeAdmin` provides:
 - Indented list display proportional to node depth
 - Read-only path, depth, and order fields
-- Drag-drop reordering endpoint (`POST <pk>/tree-move/`)
+- A move endpoint (`POST <pk>/tree-move/`) that accepts `target_id` and
+  `position` and calls `move_to()`. This is a server-side hook only: the
+  package does not ship any client-side drag-and-drop JavaScript.
+  `TreeAdmin.Media.js` is an empty tuple by design, so wiring an actual
+  drag-and-drop UI (SortableJS, jsTree, or your own) that POSTs to this
+  endpoint is the consuming project's responsibility.
 
 ---
 

@@ -335,5 +335,34 @@ class TestPathUniqueness:
         n2 = ScopedTree.objects.create(name="b", scope=s2)
         n1.refresh_from_db()
         n2.refresh_from_db()
-        # Both should have path "0001" — no collision.
+        # Both should have path "0001", no collision.
         assert n1.path == n2.path == "0001"
+
+
+class TestTreeNodeFieldTextHasNoEmOrEnDash:
+    """Regression test for #5.
+
+    TreeNode.path's help_text carried an em dash. Because it is abstract,
+    every consumer subclass freezes this exact string into its own
+    migration via Field.deconstruct(); an em dash there both violates the
+    workspace no-dash rule and forces every consumer's frozen migration to
+    byte-match it to avoid perpetual makemigrations --check drift (hit in
+    practice by icv-media#14).
+    """
+
+    def test_no_field_help_text_or_verbose_name_contains_an_em_or_en_dash(self):
+        from icv_tree.models import TreeNode
+
+        # Built from codepoints (0x2013, 0x2014) rather than literal
+        # characters so this file itself never carries a dash.
+        dash_chars = (chr(0x2013), chr(0x2014))
+        offenders = []
+        for f in TreeNode._meta.get_fields():
+            help_text = getattr(f, "help_text", "") or ""
+            verbose_name = getattr(f, "verbose_name", "") or ""
+            for label, text in (("help_text", help_text), ("verbose_name", verbose_name)):
+                text = str(text)
+                if any(ch in text for ch in dash_chars):
+                    offenders.append(f"{f.name}.{label}: {text!r}")
+
+        assert offenders == [], f"em/en dash found in TreeNode field text: {offenders}"
