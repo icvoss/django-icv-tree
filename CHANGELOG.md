@@ -7,6 +7,37 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [Unreleased]
+
+### Fixed
+
+- `reorder_siblings()` raised `TreeStructureError` ("could not find
+  row(s)") on every call against a UUID-pk model when `ordered_ids` was a
+  list of strings, the convention used by every real caller (icv-cms's
+  `reorder_pages`, and this package's own `TreeAdmin.tree_move_node`).
+  `rows_by_pk` was keyed by the raw `row.pk` (a `uuid.UUID` instance), and
+  the membership check compared that against the caller's un-normalised
+  `ordered_ids`; `str(uuid.UUID(...)) != uuid.UUID(...)` under Python
+  equality, so every id was reported missing even though the preceding
+  `pk__in` filter had already resolved every row correctly. Both sides of
+  the comparison are now normalised via `str()` (#9, #10).
+- `TreeAdmin.tree_move_node` was registered at `<int:pk>/tree-move/`, so a
+  UUID-formatted pk in the URL 404s before the view is ever reached. Now
+  registered at `<path:pk>/tree-move/`, matching Django's own
+  `ModelAdmin.get_urls()` convention for change/delete/history, which
+  resolves any pk type a Django model lookup supports (#6).
+
+### Changed
+
+- `TreeNode.path`'s `help_text` no longer contains an em dash.
+  **Breaking for `makemigrations --check`**: because `TreeNode` is
+  abstract, every consumer subclass freezes this exact string into its
+  own migration via `Field.deconstruct()`. Consumers regenerating or
+  hand-adjusting migrations for a `TreeNode` subclass after upgrading to
+  this version will see a one-time `help_text` alteration (cosmetic, no
+  column change) until their frozen migration is updated to match the new
+  string (#5).
+
 ## [0.4.0] - 2026-08-05
 
 ### Added

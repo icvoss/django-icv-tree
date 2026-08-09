@@ -293,3 +293,50 @@ class TestReorderUUIDPrimaryKey:
 
         with pytest.raises(TreeStructureError, match="not find"):
             reorder_siblings(UUIDTree, ordered_ids=[c1.pk, uuid.uuid4()])
+
+    def test_reorder_uuid_pk_siblings_with_string_ids(self):
+        """Regression test for #9/#10.
+
+        Every real caller (icv-cms's reorder_pages, this package's own
+        TreeAdmin.tree_move_node) passes ordered_ids as strings, not raw
+        uuid.UUID objects: str(pk) is the convention used everywhere else
+        in the tree API. rows_by_pk was keyed by the raw row.pk (a
+        uuid.UUID), so the missing-id membership check compared a
+        uuid.UUID against a str and always reported every id as missing,
+        even though the preceding pk__in query resolved every row
+        correctly. This test uses str(pk), unlike
+        test_reorder_uuid_pk_siblings above, which happens to pass because
+        it uses raw .pk values and therefore never exercises the mismatch.
+        """
+        from tree_testapp.models import UUIDTree
+
+        root = UUIDTree.objects.create(name="root")
+        c1 = UUIDTree.objects.create(name="c1", parent=root)
+        c2 = UUIDTree.objects.create(name="c2", parent=root)
+        c3 = UUIDTree.objects.create(name="c3", parent=root)
+
+        reorder_siblings(UUIDTree, ordered_ids=[str(c3.pk), str(c1.pk), str(c2.pk)])
+
+        c1.refresh_from_db()
+        c2.refresh_from_db()
+        c3.refresh_from_db()
+        assert (c3.order, c1.order, c2.order) == (0, 1, 2)
+        assert c3.path == root.path + "/0001"
+        assert c1.path == root.path + "/0002"
+        assert c2.path == root.path + "/0003"
+
+    def test_reorder_uuid_pk_unknown_string_id_raises(self):
+        """String-id variant of test_reorder_uuid_pk_unknown_id_raises.
+
+        Confirms the string-normalisation fix does not weaken the missing-id
+        check: a genuinely unknown id (as a string) must still raise.
+        """
+        import uuid
+
+        from tree_testapp.models import UUIDTree
+
+        root = UUIDTree.objects.create(name="root")
+        c1 = UUIDTree.objects.create(name="c1", parent=root)
+
+        with pytest.raises(TreeStructureError, match="not find"):
+            reorder_siblings(UUIDTree, ordered_ids=[str(c1.pk), str(uuid.uuid4())])

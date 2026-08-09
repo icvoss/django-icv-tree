@@ -606,9 +606,19 @@ def reorder_siblings(model: type, ordered_ids: list) -> None:
     tree_objects = tree_model._default_manager
 
     rows = list(tree_objects.filter(pk__in=ordered_ids).select_related("parent"))
-    rows_by_pk = {row.pk: row for row in rows}
+    # Keyed by str(pk), not the raw pk, so this dict membership check works
+    # regardless of whether the caller's ordered_ids are the row's native pk
+    # type (e.g. uuid.UUID) or its string form. Every real caller (icv-cms's
+    # reorder_pages, this package's own admin move endpoint, #6) passes
+    # string ids for a UUID-pk model, since that is the convention used
+    # everywhere else in the tree API; row.pk itself is a uuid.UUID
+    # instance, and str(uuid.UUID(...)) != uuid.UUID(...) under Python's
+    # equality, so comparing raw values here always missed every id despite
+    # the pk__in filter above resolving them correctly (Django coerces the
+    # lookup value). See #9/#10.
+    rows_by_pk = {str(row.pk): row for row in rows}
 
-    missing = [pk for pk in ordered_ids if pk not in rows_by_pk]
+    missing = [pk for pk in ordered_ids if str(pk) not in rows_by_pk]
     if missing:
         raise TreeStructureError(f"reorder_siblings() could not find row(s) with id(s): {missing!r}.")
 
@@ -619,7 +629,7 @@ def reorder_siblings(model: type, ordered_ids: list) -> None:
         )
 
     # Ordered list of TreeNode instances matching ordered_ids exactly.
-    ordered_rows = [rows_by_pk[pk] for pk in ordered_ids]
+    ordered_rows = [rows_by_pk[str(pk)] for pk in ordered_ids]
 
     # The rows' shared parent, needed to recompute each slot's path string.
     parent_path = ordered_rows[0].parent.path if ordered_rows[0].parent_id is not None else None
