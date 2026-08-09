@@ -270,7 +270,7 @@ class TreeNode(models.Model):
         db_index=True,
         editable=False,
         verbose_name=_("path"),
-        help_text=_("Materialised path string (e.g. '0001/0002/0003'). Managed by icv-tree — do not edit directly."),
+        help_text=_("Materialised path string (e.g. '0001/0002/0003'). Managed by icv-tree, do not edit directly."),
     )
     depth = models.PositiveIntegerField(
         default=0,
