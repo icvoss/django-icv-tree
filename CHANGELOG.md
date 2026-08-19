@@ -9,6 +9,8 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-08-19
+
 ### Added
 
 - **Django 6.1 added to the CI test matrix** and declared via the

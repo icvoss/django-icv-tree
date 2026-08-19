@@ -1,6 +1,6 @@
 """icv-tree — Materialised path tree structures for Django."""
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 default_app_config = "icv_tree.apps.IcvTreeConfig"
 
