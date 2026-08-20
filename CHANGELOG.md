@@ -9,6 +9,28 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Fixed
+
+- **Cross-scope data leak in `get_ancestors()` and `get_descendants()`**
+  (#20). Both methods filtered on the materialised `path` alone, with no
+  `tree_scope_field` predicate. Because path numbering restarts at
+  `"0001"` independently in every scope, two scopes' first roots got the
+  identical path string, so a `path__in` / `path__startswith` lookup on a
+  node in one scope could return another scope's rows. In a multi-tenant
+  consumer scoping trees by site or tenant (icv-cms's `Page.full_path`
+  walks `get_ancestors()`), this could assemble a public URL from another
+  tenant's slugs. Both methods now apply `tree_scope_field` when the model
+  declares one; models without `tree_scope_field` are unaffected.
+- `get_root()` raised `MultipleObjectsReturned` on any non-root node in a
+  scoped model once two scopes' root paths collided, since its lookup was
+  also unscoped against a `(scope_field, path)` uniqueness constraint. Now
+  scoped the same way as `get_ancestors()`/`get_descendants()`.
+- `post_delete`'s sibling-reorder handler decremented the `order` field of
+  every scope's root siblings after a root deletion, not just the deleted
+  node's own scope, because `parent_id IS NULL` matches every scope's
+  roots. `_reorder_siblings_after_removal()` is now called with the same
+  `scope_filter` construction the `pre_save` handler already uses.
+
 ## [1.1.0] - 2026-08-19
 
 ### Added

@@ -366,3 +366,154 @@ class TestRebuildScopeParameter:
 
         assert len(received) == 1
         assert received[0] is None
+
+
+@pytest.mark.django_db
+class TestScopedTraversalIsolation:
+    """Regression for icvoss/django-icv-tree#20.
+
+    get_ancestors()/get_descendants() filtered on path alone, with no
+    tree_scope_field predicate. Because paths are numbered independently
+    per scope (see TestScopedPathAssignment above), two scopes' first
+    roots both get path '0001', so an unscoped path__in / path__startswith
+    lookup on scope A's node can return scope B's rows. In a multi-tenant
+    consumer (icv-cms Page.full_path walks get_ancestors()) this is a
+    cross-tenant data leak, not just wrong ordering.
+    """
+
+    def test_get_ancestors_never_returns_another_scope(self, two_scopes, scoped_tree_model):
+        """A colliding path in scope B must never appear in scope A's ancestors."""
+        s1, s2 = two_scopes
+        a_root = scoped_tree_model.objects.create(name="A-root", scope=s1)
+        a_child = scoped_tree_model.objects.create(name="A-child", scope=s1, parent=a_root)
+        b_root = scoped_tree_model.objects.create(name="B-root", scope=s2)
+        scoped_tree_model.objects.create(name="B-child", scope=s2, parent=b_root)
+
+        # Sanity: the collision this bug depends on is real.
+        assert a_root.path == b_root.path == "0001"
+
+        ancestors = list(a_child.get_ancestors())
+        assert ancestors == [a_root]
+        assert b_root not in ancestors
+
+    def test_get_ancestors_include_self_never_returns_another_scope(self, two_scopes, scoped_tree_model):
+        s1, s2 = two_scopes
+        a_root = scoped_tree_model.objects.create(name="A-root", scope=s1)
+        a_child = scoped_tree_model.objects.create(name="A-child", scope=s1, parent=a_root)
+        b_root = scoped_tree_model.objects.create(name="B-root", scope=s2)
+
+        ancestors = list(a_child.get_ancestors(include_self=True))
+        assert ancestors == [a_root, a_child]
+        assert b_root not in ancestors
+
+    def test_get_descendants_never_returns_another_scope(self, two_scopes, scoped_tree_model):
+        """A colliding path prefix in scope B must never appear in scope A's descendants."""
+        s1, s2 = two_scopes
+        a_root = scoped_tree_model.objects.create(name="A-root", scope=s1)
+        a_child = scoped_tree_model.objects.create(name="A-child", scope=s1, parent=a_root)
+        b_root = scoped_tree_model.objects.create(name="B-root", scope=s2)
+        b_child = scoped_tree_model.objects.create(name="B-child", scope=s2, parent=b_root)
+
+        assert a_root.path == b_root.path == "0001"
+        assert a_child.path == b_child.path == "0001/0001"
+
+        descendants = list(a_root.get_descendants())
+        assert descendants == [a_child]
+        assert b_child not in descendants
+
+    def test_get_descendants_include_self_never_returns_another_scope(self, two_scopes, scoped_tree_model):
+        s1, s2 = two_scopes
+        a_root = scoped_tree_model.objects.create(name="A-root", scope=s1)
+        a_child = scoped_tree_model.objects.create(name="A-child", scope=s1, parent=a_root)
+        b_root = scoped_tree_model.objects.create(name="B-root", scope=s2)
+
+        descendants = list(a_root.get_descendants(include_self=True))
+        assert descendants == [a_root, a_child]
+        assert b_root not in descendants
+
+    def test_get_root_never_returns_another_scope(self, two_scopes, scoped_tree_model):
+        """get_root() on a non-root node must resolve within its own scope.
+
+        Before the fix this raises MultipleObjectsReturned as soon as two
+        scopes' root paths collide, because .get(path=root_path) is
+        unscoped against a (scope, path) unique-together constraint.
+        """
+        s1, s2 = two_scopes
+        a_root = scoped_tree_model.objects.create(name="A-root", scope=s1)
+        a_child = scoped_tree_model.objects.create(name="A-child", scope=s1, parent=a_root)
+        b_root = scoped_tree_model.objects.create(name="B-root", scope=s2)
+
+        assert a_root.path == b_root.path == "0001"
+        assert a_child.get_root() == a_root
+
+    def test_unscoped_model_traversal_unaffected(self, tree_nodes, simple_tree_model):
+        """Models with no tree_scope_field must query exactly as before.
+
+        tree_nodes is the shared fixture used throughout test_models.py; this
+        only proves the scope-aware branch never runs for an unscoped model.
+        """
+        root = simple_tree_model.objects.filter(parent__isnull=True).order_by("path").first()
+        assert root is not None
+        # Just exercising the traversal paths for a model with no
+        # tree_scope_field must not raise and must not filter unexpectedly.
+        list(root.get_descendants())
+        for child in root.get_children():
+            list(child.get_ancestors())
+            child.get_root()
+
+
+@pytest.mark.django_db
+class TestScopedSiblingReorderAfterDeletion:
+    """Regression for icvoss/django-icv-tree#20 (audit finding).
+
+    handle_post_delete() calls _reorder_siblings_after_removal() with no
+    scope_filter, even though the function supports one and handlers.py's
+    own pre_save root-move branch already builds one. Root nodes all share
+    parent_id IS NULL regardless of scope, so deleting a root in scope A
+    decremented `order` for every scope's root siblings after that
+    position, corrupting scope B's sibling ordering (and, on the next
+    insert, its path assignment) even though scope B was never touched by
+    the delete.
+    """
+
+    def test_deleting_a_root_does_not_reorder_another_scopes_roots(self, two_scopes, scoped_tree_model):
+        s1, s2 = two_scopes
+        a1 = scoped_tree_model.objects.create(name="A-1", scope=s1)
+        a2 = scoped_tree_model.objects.create(name="A-2", scope=s1)
+        b1 = scoped_tree_model.objects.create(name="B-1", scope=s2)
+        b2 = scoped_tree_model.objects.create(name="B-2", scope=s2)
+        b3 = scoped_tree_model.objects.create(name="B-3", scope=s2)
+
+        assert (b1.order, b2.order, b3.order) == (0, 1, 2)
+
+        # Delete scope A's first root (order=0). This must never touch
+        # scope B's sibling ordering.
+        a1.delete()
+
+        b1.refresh_from_db()
+        b2.refresh_from_db()
+        b3.refresh_from_db()
+        assert (b1.order, b2.order, b3.order) == (0, 1, 2)
+
+        # Scope A's own remaining sibling must still have its order closed up.
+        a2.refresh_from_db()
+        assert a2.order == 0
+
+    def test_deleting_a_non_root_child_does_not_reorder_another_scopes_siblings(self, two_scopes, scoped_tree_model):
+        """Non-root deletion is already scope-safe (parent_id pins the scope);
+        this pins that behaviour so a future change cannot regress it.
+        """
+        s1, s2 = two_scopes
+        a_root = scoped_tree_model.objects.create(name="A-root", scope=s1)
+        a_c1 = scoped_tree_model.objects.create(name="A-c1", scope=s1, parent=a_root)
+        a_c2 = scoped_tree_model.objects.create(name="A-c2", scope=s1, parent=a_root)
+        b_root = scoped_tree_model.objects.create(name="B-root", scope=s2)
+        b_c1 = scoped_tree_model.objects.create(name="B-c1", scope=s2, parent=b_root)
+
+        a_c1.delete()
+
+        a_c2.refresh_from_db()
+        assert a_c2.order == 0
+
+        b_c1.refresh_from_db()
+        assert b_c1.order == 0

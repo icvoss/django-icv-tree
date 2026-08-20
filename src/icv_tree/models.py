@@ -350,6 +350,25 @@ class TreeNode(models.Model):
         """
         return cls._tree_model()._default_manager
 
+    def _scope_filter(self) -> dict:
+        """Return the WHERE-clause kwargs that pin a query to this node's scope.
+
+        Empty dict when the model has no ``tree_scope_field`` (unscoped
+        models are completely unaffected: the returned filter dict is
+        empty, so ``.filter(**{})`` is a no-op). When set, mirrors the
+        ``scope_filter`` construction in ``handlers.py``'s pre_save
+        handler: ``{f"{scope_field}_id": getattr(self, f"{scope_field}_id")}``.
+
+        Without this, a path-based lookup (``path__in``, ``path__startswith``,
+        ``path=``) can match another scope's rows whenever two scopes'
+        locally-numbered paths collide, since path numbering restarts at
+        "0001" independently per scope (see rebuild()/_insert_node()).
+        """
+        scope_field = getattr(self, "tree_scope_field", None)
+        if not scope_field:
+            return {}
+        return {f"{scope_field}_id": getattr(self, f"{scope_field}_id")}
+
     # ------------------------------------------------------------------
     # Traversal instance methods
     # ------------------------------------------------------------------
@@ -363,7 +382,11 @@ class TreeNode(models.Model):
         Returns:
             QuerySet over the tree's base model, ordered by depth ascending. For
             multi-table-inheritance trees this scopes to the base table so
-            ancestors stored as sibling subtypes are still found.
+            ancestors stored as sibling subtypes are still found. When the
+            model defines ``tree_scope_field``, the query is also restricted
+            to this node's own scope value, so a path collision with another
+            scope (paths are numbered independently per scope) can never
+            return that other scope's rows.
         """
         from .conf import get_setting
 
@@ -375,7 +398,7 @@ class TreeNode(models.Model):
             ancestor_paths.append(self.path)
         if not ancestor_paths:
             return manager.none()
-        return manager.filter(path__in=ancestor_paths).order_by("depth")
+        return manager.filter(path__in=ancestor_paths, **self._scope_filter()).order_by("depth")
 
     def get_descendants(self, include_self: bool = False) -> models.QuerySet:
         """Return a QuerySet of all descendant nodes, ordered depth-first.
@@ -386,15 +409,20 @@ class TreeNode(models.Model):
         Returns:
             QuerySet over the tree's base model, ordered by path. For
             multi-table-inheritance trees this scopes to the base table so
-            descendants of any subtype are found.
+            descendants of any subtype are found. When the model defines
+            ``tree_scope_field``, the query is also restricted to this
+            node's own scope value, so a path-prefix collision with another
+            scope (paths are numbered independently per scope) can never
+            return that other scope's rows.
         """
         from .conf import get_setting
 
         manager = self._tree_objects()
         separator = get_setting("ICV_TREE_PATH_SEPARATOR", "/")
-        qs = manager.filter(path__startswith=self.path + separator)
+        scope_filter = self._scope_filter()
+        qs = manager.filter(path__startswith=self.path + separator, **scope_filter)
         if include_self:
-            qs = qs | manager.filter(pk=self.pk)
+            qs = qs | manager.filter(pk=self.pk, **scope_filter)
         return qs.order_by("path")
 
     def get_children(self) -> models.QuerySet:
@@ -427,6 +455,15 @@ class TreeNode(models.Model):
 
         Side effects:
             One DB query if not already root; zero queries if already root.
+
+        Note:
+            When the model defines ``tree_scope_field``, the lookup is
+            restricted to this node's own scope value. Without this, a root
+            path collision with another scope (root paths are numbered
+            independently per scope, starting at "0001" in each) raises
+            ``MultipleObjectsReturned`` here, since the uniqueness
+            constraint on a scoped model is ``(scope_field, path)``, not
+            ``path`` alone.
         """
         if self.depth == 0:
             return self
@@ -434,7 +471,7 @@ class TreeNode(models.Model):
 
         separator = get_setting("ICV_TREE_PATH_SEPARATOR", "/")
         root_path = self.path.split(separator)[0]
-        return self._tree_objects().get(path=root_path)
+        return self._tree_objects().get(path=root_path, **self._scope_filter())
 
     def is_root(self) -> bool:
         """Return True if this node has no parent (no DB query required)."""
