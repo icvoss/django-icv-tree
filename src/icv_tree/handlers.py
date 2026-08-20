@@ -188,6 +188,13 @@ def handle_post_delete(sender, instance, **kwargs) -> None:  # type: ignore[no-u
     """Repair sibling order values after a TreeNode subclass instance is deleted.
 
     Calls _reorder_siblings_after_removal() per BR-TREE-022.
+
+    Builds a scope_filter when the model defines tree_scope_field, mirroring
+    the pre_save handler's scope_filter construction above. Without it, a
+    deleted root's siblings-after-removal update (parent_id IS NULL) would
+    also decrement the `order` field of every OTHER scope's root siblings,
+    since parent_id IS NULL matches every scope's roots regardless of which
+    scope the deleted node belonged to (icvoss/django-icv-tree#20).
     """
     if getattr(_skip_signals, "skip", False):
         return
@@ -196,4 +203,9 @@ def handle_post_delete(sender, instance, **kwargs) -> None:  # type: ignore[no-u
 
     from .services.mutations import _reorder_siblings_after_removal
 
-    _reorder_siblings_after_removal(sender, instance.parent_id, instance.order)
+    scope_filter = {}
+    scope_field = getattr(sender, "tree_scope_field", None)
+    if scope_field:
+        scope_filter[f"{scope_field}_id"] = getattr(instance, f"{scope_field}_id")
+
+    _reorder_siblings_after_removal(sender, instance.parent_id, instance.order, scope_filter=scope_filter)
