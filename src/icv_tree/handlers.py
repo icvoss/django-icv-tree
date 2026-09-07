@@ -1,11 +1,42 @@
 """
 Signal handlers for icv-tree.
 
-Connected in IcvTreeConfig.ready() via import.
+handle_pre_save: computes path/depth/order on new node insert; delegates to
+    move_to when parent changes on update.
+handle_post_delete: repairs sibling order after node deletion.
 
-handle_pre_save  — computes path/depth/order on new node insert;
-                   delegates to move_to when parent changes on update.
-handle_post_delete — repairs sibling order after node deletion.
+Both handlers are connected per sender, never bare, so that unrelated
+consumer models keep Django's fast-delete path (see
+icvoss/django-icv-tree#24). Bare registration attached to every model in a
+consuming project, and Django's Collector.can_fast_delete() returns False
+for any model carrying a pre_delete/post_delete listener regardless of what
+the handler body does, so this silently removed the fast-delete path (a
+single DELETE ... WHERE) from every queryset .delete() in a consumer
+project, not just TreeNode deletes. The handler bodies are unchanged: the
+_skip_signals check and the _is_tree_node_subclass guard stay in place, both
+because they are cheap and because they keep the handlers correct if
+anything ever connects them senderless again.
+
+Connection happens twice, deliberately:
+
+- ``_connect_tree_handlers()`` walks ``apps.get_models()`` from
+  ``IcvTreeConfig.ready()``, connecting every concrete TreeNode subclass
+  that exists once the app registry is populated. apps.get_models() never
+  returns abstract models, so the abstract TreeNode base itself is skipped
+  automatically.
+- ``_connect_handlers_for_new_model()`` listens on ``class_prepared`` so a
+  model defined AFTER ``ready()`` (a test-local subclass, a dynamically
+  built model) still gets wired.
+
+Both paths use ``dispatch_uid`` per sender, so re-running either (a second
+``ready()`` under some test runners, a duplicate ``class_prepared`` fire)
+never double-connects a handler.
+
+Residual limitation: a model prepared before ``apps.models_ready`` and never
+registered in the app registry (i.e. it never reaches a normal ready()
+walk or a later class_prepared fire once models are ready) is not wired.
+This is not expected to occur for any model Django's own app loading
+produces; see _connect_handlers_for_new_model() below for the detail.
 """
 
 from __future__ import annotations
@@ -14,8 +45,7 @@ import threading
 from collections.abc import Generator
 from contextlib import contextmanager
 
-from django.db.models.signals import post_delete, pre_save
-from django.dispatch import receiver
+from django.db.models.signals import class_prepared, post_delete, pre_save
 
 # Thread-local flag used by skip_tree_signals() context manager.
 _skip_signals = threading.local()
@@ -57,7 +87,6 @@ def _is_tree_node_subclass(sender) -> bool:  # type: ignore[no-untyped-def]
     return isinstance(sender, type) and issubclass(sender, TreeNode) and not sender._meta.abstract
 
 
-@receiver(pre_save)
 def handle_pre_save(sender, instance, **kwargs) -> None:  # type: ignore[no-untyped-def]
     """Compute path/depth/order before a TreeNode subclass instance is saved.
 
@@ -183,7 +212,6 @@ def handle_pre_save(sender, instance, **kwargs) -> None:  # type: ignore[no-unty
                             )
 
 
-@receiver(post_delete)
 def handle_post_delete(sender, instance, **kwargs) -> None:  # type: ignore[no-untyped-def]
     """Repair sibling order values after a TreeNode subclass instance is deleted.
 
@@ -209,3 +237,93 @@ def handle_post_delete(sender, instance, **kwargs) -> None:  # type: ignore[no-u
         scope_filter[f"{scope_field}_id"] = getattr(instance, f"{scope_field}_id")
 
     _reorder_siblings_after_removal(sender, instance.parent_id, instance.order, scope_filter=scope_filter)
+
+
+# ---------------------------------------------------------------------------
+# Per-sender connection (icvoss/django-icv-tree#24)
+# ---------------------------------------------------------------------------
+
+# Handlers keyed by the signal they connect to and the predicate that
+# decides whether a given model is one of theirs. Shared by both connection
+# paths below so the two never drift apart.
+_TREE_RECEIVERS = (
+    (pre_save, handle_pre_save, "handle_pre_save"),
+    (post_delete, handle_post_delete, "handle_post_delete"),
+)
+
+
+def _connect_for_model(model) -> None:  # type: ignore[no-untyped-def]
+    """Connect the pre_save/post_delete handlers for a single concrete model.
+
+    A no-op for any model that is not a concrete TreeNode subclass. Uses a
+    dispatch_uid keyed on the handler name and the model, so calling this
+    more than once for the same model (a second ready(), a duplicate
+    class_prepared fire) never double-connects.
+    """
+    if not _is_tree_node_subclass(model):
+        return
+
+    for signal, handler, name in _TREE_RECEIVERS:
+        signal.connect(
+            handler,
+            sender=model,
+            dispatch_uid=f"icv_tree.handlers.{name}.{model._meta.label}",
+        )
+
+
+def _connect_tree_handlers() -> None:
+    """Connect the pre_save/post_delete handlers for every model already registered.
+
+    Called from IcvTreeConfig.ready(). Walks apps.get_models(), which is
+    safe once the app registry is populated, and connects each handler with
+    an explicit sender rather than the bare pre_save/post_delete registration
+    this replaces. Bare registration attached to every model in a consuming
+    project, which disables Django's fast-delete path for all of them: see
+    #24 for the measured impact.
+
+    Skips abstract models implicitly, since apps.get_models() never returns
+    them, which is why the abstract TreeNode base itself needs no special
+    casing here.
+
+    There is no swappable base in this package (unlike icv_taxonomy's
+    get_term_model()): TreeNode is abstract-only, so every concrete
+    subclass a consumer defines, including multi-table-inheritance
+    children such as tree_testapp's RegularPage/RedirectPage, is connected
+    here via _is_tree_node_subclass, not a single resolved default model.
+
+    Models defined after this call (a test-local model, a model built
+    dynamically at runtime) are not covered here; see
+    _connect_handlers_for_new_model() below for that case.
+    """
+    from django.apps import apps
+
+    for model in apps.get_models():
+        _connect_for_model(model)
+
+
+def _connect_handlers_for_new_model(sender, **kwargs) -> None:  # type: ignore[no-untyped-def]
+    """class_prepared receiver: wire a model defined after ready() has run.
+
+    apps.get_models() in _connect_tree_handlers() only sees models that
+    exist at ready() time. A model defined afterwards, such as a test-local
+    subclass or one built dynamically, would otherwise never get connected.
+    This listens on class_prepared instead.
+
+    Guarded on apps.models_ready: class_prepared also fires for every model
+    in the project during Django's own app-loading pass, well before that
+    point, and the app registry is not queryable yet. Models prepared
+    during app loading are already covered by _connect_tree_handlers() once
+    ready() runs, so skipping them here loses nothing. The residual
+    limitation is a model prepared before apps.models_ready that is never
+    registered in the app registry at all: such a model is not wired by
+    either path, though this does not occur for any model produced by
+    Django's own app loading.
+    """
+    from django.apps import apps
+
+    if not apps.models_ready:
+        return
+    _connect_for_model(sender)
+
+
+class_prepared.connect(_connect_handlers_for_new_model)

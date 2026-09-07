@@ -15,10 +15,15 @@ class IcvTreeConfig(AppConfig):
 
     def ready(self) -> None:
         """Connect signal handlers and validate settings at startup."""
-        from . import (
-            handlers,  # noqa: F401 — connects pre_save / post_delete handlers
-        )
+        from . import handlers
         from .conf import get_setting
+
+        # Connect the pre_save/post_delete handlers, per sender, for every
+        # concrete TreeNode subclass registered so far (see
+        # icvoss/django-icv-tree#24: bare pre_save/post_delete registration
+        # disabled Django's fast-delete path for every model in a consuming
+        # project, not just TreeNode subclasses).
+        handlers._connect_tree_handlers()
 
         self._validate_settings(get_setting)
 
