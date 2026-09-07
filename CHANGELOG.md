@@ -9,6 +9,33 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Fixed
+
+- **`pre_save`/`post_delete` handlers connected per sender, not bare** (#24).
+  `handle_pre_save` and `handle_post_delete` in `handlers.py` used to
+  connect with `@receiver(pre_save)` / `@receiver(post_delete)` and no
+  `sender`, so they attached to every model in a consuming project, not
+  just `TreeNode` subclasses. The handlers guarded correctly and returned
+  early for unrelated models, so this was never a correctness defect, but
+  it had a measurable cost: Django's `Collector.can_fast_delete()` returns
+  `False` for any model carrying a `pre_delete`/`post_delete` listener
+  regardless of what the listener does, so every unrelated model in a
+  consuming project lost Django's fast-delete path (a single
+  `DELETE ... WHERE ...`) and instead fetched every row and dispatched
+  signals per row on every queryset `.delete()`. Both handlers are now
+  connected with an explicit `sender=model` for every concrete `TreeNode`
+  subclass registered in the app registry, walked from
+  `IcvTreeConfig.ready()`, plus a `class_prepared` receiver that wires a
+  model defined after `ready()` (a test-local subclass, a dynamically
+  built model). Handler bodies, `skip_tree_signals()`, and the
+  `_is_tree_node_subclass` guard are unchanged.
+
+  **Behaviour change on upgrade:** a `TreeNode` subclass prepared before
+  `apps.models_ready` and never registered in the app registry at all is
+  not wired by either connection path. This does not occur for any model
+  produced by Django's own app loading; it only matters for exotic
+  dynamic-model construction outside the normal app-loading sequence.
+
 ## [1.1.1] - 2026-08-20
 
 ### Fixed

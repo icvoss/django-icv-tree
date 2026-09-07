@@ -107,6 +107,28 @@ class RedirectPage(Page):
         db_table = "tree_testapp_redirectpage"
 
 
+class UnrelatedModel(models.Model):
+    """Plain, cascade-free model unrelated to icv-tree.
+
+    Deliberately has no incoming ForeignKey from any model in this test app
+    and is not itself a TreeNode subclass, so it is the fixture for proving
+    Collector.can_fast_delete() returns True for it once icv-tree's
+    pre_save/post_delete handlers are connected per sender rather than
+    bare (icvoss/django-icv-tree#24). Scope cannot be used for this: it has
+    an incoming FK from ScopedTree, so it is never fast-deletable on its
+    own relations alone regardless of any signal wiring.
+    """
+
+    name = models.CharField(max_length=100)
+
+    class Meta:
+        app_label = "tree_testapp"
+        db_table = "tree_testapp_unrelatedmodel"
+
+    def __str__(self) -> str:
+        return self.name
+
+
 class Scope(models.Model):
     """Simple scope model (analogous to Vocabulary) for testing tree_scope_field."""
 

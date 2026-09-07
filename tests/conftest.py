@@ -26,6 +26,7 @@ def _clean_tree_testapp_tables(django_db_setup, django_db_blocker) -> None:  # t
             "tree_testapp_optouttree",
             "tree_testapp_simpletree",
             "tree_testapp_uuidtree",
+            "tree_testapp_unrelatedmodel",
         )
         is_pg = connection.vendor == "postgresql"
 
