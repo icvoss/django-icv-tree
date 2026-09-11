@@ -226,6 +226,59 @@ class TestTreeAdminGetQueryset:
         # internally sorted: child_b now sorts before child_a.
         assert paths.index(child_b.path) < paths.index(child_a.path)
 
+    def test_get_queryset_orders_by_path_even_against_a_reversed_default_ordering(self):
+        """get_queryset's own .order_by("path") wins over a model default that
+        would otherwise sort descending, proving the admin's override is load
+        bearing rather than merely agreeing with SimpleTree's own ascending
+        Meta.ordering (icvoss/django-icv-tree#29 follow-up).
+
+        ReversePathTree is a proxy of SimpleTree with ``ordering = ["-path"]``,
+        registered on tree_testapp for the duration of this test only. A
+        proxy shares SimpleTree's table and TreeNode's pre_save/post_delete
+        signal wiring (class_prepared connects any concrete, non-abstract
+        TreeNode subclass, proxies included), so no migration is needed and
+        no double-connection occurs.
+
+        Teeth: with TreeAdmin.get_queryset's ``.order_by("path")`` removed,
+        the base queryset falls back to the proxy's own Meta.ordering
+        (``-path``), and this assertion fails because the rows come back in
+        descending path order instead of ascending.
+        """
+        from django.apps import apps
+        from django.contrib import admin
+        from tree_testapp.models import SimpleTree
+
+        from icv_tree.admin import TreeAdmin
+
+        class ReversePathTree(SimpleTree):
+            class Meta:
+                proxy = True
+                app_label = "tree_testapp"
+                ordering = ["-path"]
+
+        try:
+
+            class ReversePathTreeAdmin(TreeAdmin, admin.ModelAdmin):
+                pass
+
+            root = ReversePathTree.objects.create(name="root")
+            child_a = ReversePathTree.objects.create(name="child_a", parent=root)
+            child_b = ReversePathTree.objects.create(name="child_b", parent=root)
+
+            admin_instance = ReversePathTreeAdmin(ReversePathTree, AdminSite())
+            rf = RequestFactory()
+            request = rf.get("/admin/")
+            request.user = _make_superuser("gq_user_reverse")
+
+            qs = admin_instance.get_queryset(request)
+            paths = list(qs.values_list("path", flat=True))
+
+            expected_ascending = sorted([root.path, child_a.path, child_b.path])
+            assert paths == expected_ascending
+        finally:
+            apps.all_models["tree_testapp"].pop("reversepathtree", None)
+            apps.clear_cache()
+
     def test_get_queryset_returns_a_queryset(self, make_node):
         """get_queryset() returns a QuerySet, the base queryset with ordering applied."""
         from django.db.models import QuerySet
