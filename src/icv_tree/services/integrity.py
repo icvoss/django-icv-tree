@@ -277,9 +277,12 @@ def _rebuild_cte(model: type, scope: Any = None) -> dict:
         if to_update:
             # Clear paths to PK-based placeholders first to avoid
             # transient unique constraint violations during bulk_update.
-            # Restricted to the target scope so other scopes' rows (and
-            # their real paths) are never touched.
-            _clear_paths_to_placeholders(model, batch_size, scope_field=scope_field, scope=scope)
+            # Restricted to the rows about to be rewritten (and, as belt
+            # and braces, to the target scope), so already-correct rows
+            # never lose their real paths.
+            _clear_paths_to_placeholders(
+                model, [node.pk for node in to_update], batch_size, scope_field=scope_field, scope=scope
+            )
 
             qs = _unfiltered_qs(model, scope_field=scope_field, scope=scope)
             for i in range(0, len(to_update), batch_size):
@@ -337,6 +340,7 @@ def _unfiltered_qs(model: type, scope_field: str | None = None, scope: Any = Non
 
 def _clear_paths_to_placeholders(
     model: type,
+    pks: list,
     batch_size: int,
     scope_field: str | None = None,
     scope: Any = None,
@@ -346,33 +350,51 @@ def _clear_paths_to_placeholders(
     During rebuild, ``bulk_update`` writes new path values while old paths
     still exist in the table. When a unique constraint covers the path
     column, a new value can collide with an old value on a row that hasn't
-    been updated yet.  By first setting every path to a placeholder that
-    is guaranteed unique (derived from the PK), the subsequent real update
-    can proceed without constraint violations.
+    been updated yet. By first setting the paths of the rows about to be
+    rewritten to a placeholder that is guaranteed unique (derived from the
+    PK), the subsequent real update can proceed without constraint
+    violations.
 
-    Uses a single UPDATE ... SET path = '__rebuild_' || pk || '__' so the
-    operation is fast even for large tables, and does NOT mutate in-memory
-    node objects.
+    Only clears rows in ``pks`` (the rows in ``to_update``), not every row
+    in scope. An unchanged row's final path is, by definition, already
+    equal to its current path, and the full set of final paths computed by
+    rebuild is unique (one root numbering per scope, one path per sibling
+    order), so an updated row's final path cannot collide with an
+    unchanged row's current path. An unchanged row therefore never needs a
+    placeholder; clearing it would only cost writes and leave it
+    permanently on a placeholder if it were ever omitted from the
+    following bulk_update pass.
+
+    Uses ``UPDATE ... WHERE pk IN (...) SET path = '__rebuild_' || pk ||
+    '__'``, batched, so the operation is fast even for large tables, and
+    does NOT mutate in-memory node objects.
 
     Args:
         model: A concrete TreeNode subclass.
-        batch_size: Unused here (kept for signature symmetry with callers);
-            the placeholder clear is a single UPDATE regardless of table size.
-        scope_field: When given (together with ``scope``), only rows in
-            that scope are cleared. Rows in other scopes keep their real
-            paths untouched, which is safe because the uniqueness
-            constraint on a scoped model covers ``(scope_field, path)``,
-            not ``path`` alone. A placeholder in one scope can therefore
-            never collide with a real path in a different scope.
+        pks: Primary keys of the rows to clear (the rows about to be
+            rewritten by the caller's subsequent bulk_update).
+        batch_size: Number of pks to clear per UPDATE statement.
+        scope_field: When given (together with ``scope``), clearing is
+            additionally restricted to that scope as belt and braces. Rows
+            in other scopes keep their real paths untouched, which is safe
+            because the uniqueness constraint on a scoped model covers
+            ``(scope_field, path)``, not ``path`` alone. A placeholder in
+            one scope can therefore never collide with a real path in a
+            different scope.
         scope: The scope value to restrict clearing to. Ignored if
             ``scope_field`` is None.
     """
     from django.db.models import CharField, Value
     from django.db.models.functions import Cast, Concat
 
-    _unfiltered_qs(model, scope_field=scope_field, scope=scope).update(
-        path=Concat(Value("__rebuild_"), Cast("pk", CharField()), Value("__")),
-    )
+    if not pks:
+        return
+
+    qs = _unfiltered_qs(model, scope_field=scope_field, scope=scope)
+    for i in range(0, len(pks), batch_size):
+        qs.filter(pk__in=pks[i : i + batch_size]).update(
+            path=Concat(Value("__rebuild_"), Cast("pk", CharField()), Value("__")),
+        )
 
 
 def _get_scope_value(node: TreeNode, scope_field: str | None):  # type: ignore[no-untyped-def]
@@ -549,9 +571,12 @@ def rebuild(model: type, scope: Any = None) -> dict:
         if to_update:
             # Clear paths to PK-based placeholders first to avoid
             # transient unique constraint violations during bulk_update.
-            # Restricted to the target scope so other scopes' rows (and
-            # their real paths) are never touched.
-            _clear_paths_to_placeholders(model, batch_size, scope_field=scope_field, scope=scope)
+            # Restricted to the rows about to be rewritten (and, as belt
+            # and braces, to the target scope), so already-correct rows
+            # never lose their real paths.
+            _clear_paths_to_placeholders(
+                model, [node.pk for node in to_update], batch_size, scope_field=scope_field, scope=scope
+            )
 
             # Now write the final computed paths.
             for i in range(0, len(to_update), batch_size):

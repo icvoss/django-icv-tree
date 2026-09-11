@@ -29,6 +29,18 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   `TreeStructureError` naming both models. A move between two
   multi-table-inheritance subtypes of one base still succeeds, since both
   resolve to the same `_tree_model()`.
+- **`rebuild()` no longer overwrites already-correct rows with placeholder
+  paths** (#42). `_clear_paths_to_placeholders()` set every row in scope to
+  a `__rebuild_<pk>__` placeholder before writing the recomputed values
+  back, but only the rows in `to_update` were ever rewritten with their
+  real path afterwards, so an already-correct row in a partially
+  inconsistent tree kept its placeholder path permanently (until a
+  subsequent `rebuild()` happened to repair it as a side effect). The
+  placeholder pass is now restricted to the primary keys being rewritten:
+  an updated row's final path cannot collide with an unchanged row's
+  current path, since the full set of final paths computed by `rebuild()`
+  is unique, so an unchanged row never needed a placeholder in the first
+  place.
 - **`rebuild()` now counts and reports orphaned rows on both paths** (#35).
   A row whose `parent_id` references a non-existent or otherwise
   unreachable row (typically a hard delete that bypassed cascade) was

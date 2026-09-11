@@ -130,19 +130,32 @@ class TestMoveToValidation:
     def test_move_to_raises_on_unrelated_tree_model_target(self, tree_nodes):
         """A target from an unrelated concrete tree model must raise.
 
-        Regression for icvoss/django-icv-tree#28. Fails on old code: no
-        check compares node._tree_model() and target._tree_model(), so the
-        call previously fell through into the position-computation logic
-        with no exception.
+        Regression for icvoss/django-icv-tree#28. The fixture deliberately
+        gives ``root1`` (a ``SimpleTree`` row) and ``other_model_node`` (a
+        ``ScopedTree`` row) the same pk: both tables are empty at the start
+        of this test, so each model's first row lands on pk=1 independently.
+        This falsifies the old check ordering, where the pk-based
+        ``target.pk == node.pk`` self-check ran BEFORE the tree-model
+        comparison: with equal pks across unrelated models, the old code
+        raised "Cannot move a node to itself", the wrong error, for the
+        wrong reason, and this test would have passed against it anyway
+        without ever exercising the tree-model guard. Asserting the
+        tree-model message via ``match`` makes that impossible: the old
+        ordering's message does not contain "tree model".
         """
-        from icv_tree.exceptions import TreeStructureError
         from tree_testapp.models import Scope, ScopedTree
+
+        from icv_tree.exceptions import TreeStructureError
 
         scope = Scope.objects.create(name="Scope A")
         other_model_node = ScopedTree.objects.create(name="other-root", scope=scope)
 
         root1 = tree_nodes["root1"]
-        with pytest.raises(TreeStructureError):
+        assert root1.pk == other_model_node.pk, (
+            "fixture must give node and target the same pk across unrelated "
+            "models to falsify the old check ordering"
+        )
+        with pytest.raises(TreeStructureError, match="must resolve to the same tree model"):
             root1.move_to(other_model_node, "last-child")
 
     def test_move_to_succeeds_across_mti_subtypes(self, db):
@@ -336,6 +349,53 @@ class TestRebuild:
         integrity = check_tree_integrity(simple_tree_model)
         assert integrity["total_issues"] == 0
         assert result["nodes_updated"] > 0
+
+    def test_rebuild_leaves_already_correct_subtree_untouched(self, tree_nodes, simple_tree_model):
+        """rebuild() must not write placeholders to rows outside to_update.
+
+        Regression for icvoss/django-icv-tree#42. The fixture's two root
+        subtrees are independent: root1 (with child1/grandchild1/
+        grandchild2/child2) is corrupted via a raw QuerySet.update() that
+        bypasses icv-tree's own handlers, root2 (standalone) is left
+        untouched and consistent. Fails on old code: the old
+        ``_clear_paths_to_placeholders`` wrote ``__rebuild_<pk>__`` to
+        EVERY row in scope, including root2, via ``_unfiltered_qs`` with no
+        pk filter, so root2's path/depth/order tuple would no longer be
+        byte-identical after rebuild(), and nodes_unchanged would
+        undercount by root2's size (1) because root2 was corrupted by the
+        placeholder pass itself, after being loaded as already-correct.
+        """
+        root1 = tree_nodes["root1"]
+        root2 = tree_nodes["root2"]
+
+        # Corrupt only root1's subtree (root1, child1, child2, grandchild1,
+        # grandchild2), bypassing icv-tree's own handlers.
+        subtree_a_pks = [
+            tree_nodes["root1"].pk,
+            tree_nodes["child1"].pk,
+            tree_nodes["child2"].pk,
+            tree_nodes["grandchild1"].pk,
+            tree_nodes["grandchild2"].pk,
+        ]
+        for pk in subtree_a_pks:
+            simple_tree_model.objects.filter(pk=pk).update(path=f"CORRUPT_{pk}", depth=99, order=99)
+
+        # Snapshot subtree B (root2, which has no children) before rebuild.
+        root2.refresh_from_db()
+        subtree_b_before = [(root2.pk, root2.path, root2.depth, root2.order)]
+
+        result = simple_tree_model.objects.rebuild()
+
+        root2.refresh_from_db()
+        subtree_b_after = [(root2.pk, root2.path, root2.depth, root2.order)]
+        assert subtree_b_after == subtree_b_before
+
+        root1.refresh_from_db()
+        assert root1.path == "0001"
+        assert root1.depth == 0
+        assert root1.order == 0
+
+        assert result["nodes_unchanged"] == len(subtree_b_before)
 
     def test_rebuild_is_idempotent(self, tree_nodes, simple_tree_model):
         """Running rebuild() twice on a consistent tree should produce 0 updates."""
