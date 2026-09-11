@@ -35,6 +35,25 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   JavaScript, REST endpoints, search integration, caching, authorisation),
   matching the scope statement already in the umbrella spec and the shape
   of django-boundary's README.
+- **CI now runs a PostgreSQL leg** (#40). `tests/test_rebuild_cte.py`
+  exercises `_rebuild_cte()`, the `ICV_TREE_ENABLE_CTE` recursive-CTE fast
+  path, but every test in it was skipped on every prior CI run: `ci.yml`
+  had no PostgreSQL service, so `connection.vendor` was never
+  `"postgresql"` and a green suite said nothing about that path. A new
+  `test-postgres` job (Python 3.12, Django 6.1, `postgres:16` service) sets
+  `POSTGRES_HOST`/`POSTGRES_PORT`/`POSTGRES_DB`/`POSTGRES_USER`/
+  `POSTGRES_PASSWORD` and `ICV_TREE_ENABLE_CTE=1`, runs the full suite
+  against PostgreSQL, then runs `tests/test_rebuild_cte.py` a second time on
+  its own and fails the job if that run reports no `N passed` summary line
+  or any `SKIPPED` test, so the leg cannot pass vacuously if the vendor
+  guard stops lifting. `tests/settings.py` now switches the `default`
+  database alias to PostgreSQL when `POSTGRES_HOST` is set (the `other`
+  alias, used only by the PathIndex router-guard tests, stays on SQLite)
+  and reads `ICV_TREE_ENABLE_CTE` from the environment. Both aliases now
+  set an explicit empty `TEST["DEPENDENCIES"]`: running
+  `tests/test_operations_pathindex.py`'s `databases=["other"]` tests
+  alongside a PostgreSQL `default` alias otherwise raises
+  `ImproperlyConfigured: Circular dependency in TEST[DEPENDENCIES]`.
 
 ### Fixed
 
@@ -129,6 +148,20 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   alias) rather than `schema_editor.connection`, so a non-default alias on
   a different backend received the wrong SQL; it now reads
   `schema_editor.connection.vendor`.
+- **`_rebuild_cte()` no longer raises `UndefinedColumn` on PostgreSQL**
+  (#43). The recursive CTE's `tree` member selected `tree.computed_path` in
+  its recursive term, a column that only existed in the later
+  `tree_with_path` CTE, so every call on the only backend the fast path
+  targets (`ICV_TREE_ENABLE_CTE = True` on PostgreSQL) failed with
+  `psycopg.errors.UndefinedColumn`. PostgreSQL also forbids a window
+  function in a recursive CTE's recursive term, so the fix precomputes
+  `sib_order` for every row up front in a non-recursive `numbered` CTE
+  (partitioned the same way the anchor member always was: by scope and
+  `parent_id` for roots, by `parent_id` alone for children), then the
+  recursive `tree` CTE walks `numbered` and does only string concatenation
+  and depth increment in its recursive term. Scope partitioning, the anchor
+  restriction, zero-based `sib_order`, the final column order consumed by
+  `pk_to_computed`, and the parametrised scope bind are all unchanged.
 
 ## [1.2.0] - 2026-09-07
 
