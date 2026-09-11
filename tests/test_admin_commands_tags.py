@@ -178,6 +178,70 @@ class TestTreeAdminGetReadonlyFields:
 
 
 @pytest.mark.django_db
+class TestTreeAdminGetQueryset:
+    """get_queryset orders the admin list view by path (icvoss/django-icv-tree#29).
+
+    Evidence: admin.py TreeAdmin.get_queryset overrides ModelAdmin's default
+    (pk order) with .order_by("path"), but no prior test called get_queryset
+    directly; it was only reachable indirectly via fixtures that happened to
+    already be in path order.
+    """
+
+    def _make_admin(self):
+        from django.contrib import admin
+        from tree_testapp.models import SimpleTree
+
+        from icv_tree.admin import TreeAdmin
+
+        class SimpleTreeAdmin(TreeAdmin, admin.ModelAdmin):
+            pass
+
+        return SimpleTreeAdmin(SimpleTree, AdminSite())
+
+    def test_get_queryset_orders_by_path_after_a_move_changes_creation_order(self, make_node):
+        """Rows come back in path order, not creation order, once a move_to() changes it.
+
+        Build two children under a root in creation order (child_a, child_b),
+        then move child_b before child_a, so path order and creation/pk order
+        diverge. get_queryset() must reflect path order, not pk order.
+        """
+        root = make_node("root")
+        child_a = make_node("child_a", parent=root)
+        child_b = make_node("child_b", parent=root)
+
+        child_b.move_to(child_a, position="left")
+        child_a.refresh_from_db()
+        child_b.refresh_from_db()
+
+        admin_instance = self._make_admin()
+        rf = RequestFactory()
+        request = rf.get("/admin/")
+        request.user = _make_superuser("gq_user")
+
+        qs = admin_instance.get_queryset(request)
+        paths = list(qs.values_list("path", flat=True))
+
+        assert paths == sorted(paths)
+        # And it must actually reflect the post-move order, not merely be
+        # internally sorted: child_b now sorts before child_a.
+        assert paths.index(child_b.path) < paths.index(child_a.path)
+
+    def test_get_queryset_returns_a_queryset(self, make_node):
+        """get_queryset() returns a QuerySet, the base queryset with ordering applied."""
+        from django.db.models import QuerySet
+
+        make_node("root")
+        admin_instance = self._make_admin()
+        rf = RequestFactory()
+        request = rf.get("/admin/")
+        request.user = _make_superuser("gq_user_type")
+
+        qs = admin_instance.get_queryset(request)
+
+        assert isinstance(qs, QuerySet)
+
+
+@pytest.mark.django_db
 class TestTreeAdminMoveEndpointUUIDPrimaryKey:
     """Regression tests for #6: tree_move_node must work with UUID pks.
 

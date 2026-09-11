@@ -9,6 +9,33 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+
+- **New system check `icv_tree.W001`: path uniqueness** (#31). The abstract
+  `path` field carries `db_index=True` only, not `unique=True`, so
+  uniqueness on `path` (or on `(tree_scope_field, path)` for a scoped model)
+  exists only if the concrete model adds its own `UniqueConstraint` or
+  `unique_together`. `check_path_uniqueness()` now warns per concrete
+  `TreeNode` subclass that declares none, naming the model and the expected
+  field set, with a hint showing the `UniqueConstraint` to add. Registered
+  automatically on the `models` check tag, since it only inspects `Meta`
+  declarations and needs no database access; unlike `check_all_tree_models`
+  (`icv_tree.E001`/`E002`), it runs on every `check` and `migrate`. A
+  Warning for this release, since some existing consumers (e.g. icv-media's
+  `MediaFolder`) do not yet declare the constraint; becomes an Error at the
+  next major. Opt out per model with `check_tree_integrity = False`, the
+  same attribute `check_all_tree_models` honours.
+
+### Changed
+
+- **README now documents package boundaries** (#30). Added a `## Boundaries`
+  section stating what the package deliberately does not do (nested set or
+  closure table representations, polymorphic inheritance handling beyond
+  MTI routing, multi-tenancy, move history or versioning, drag-and-drop
+  JavaScript, REST endpoints, search integration, caching, authorisation),
+  matching the scope statement already in the umbrella spec and the shape
+  of django-boundary's README.
+
 ### Fixed
 
 - **`get_descendant_count()` now scopes to `tree_scope_field`** (#32).
