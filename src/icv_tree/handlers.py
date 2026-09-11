@@ -41,11 +41,14 @@ produces; see _connect_handlers_for_new_model() below for the detail.
 
 from __future__ import annotations
 
+import logging
 import threading
 from collections.abc import Generator
 from contextlib import contextmanager
 
 from django.db.models.signals import class_prepared, post_delete, pre_save
+
+logger = logging.getLogger("icv_tree")
 
 # Thread-local flag used by skip_tree_signals() context manager.
 _skip_signals = threading.local()
@@ -85,6 +88,58 @@ def _is_tree_node_subclass(sender) -> bool:  # type: ignore[no-untyped-def]
     from .models import TreeNode
 
     return isinstance(sender, type) and issubclass(sender, TreeNode) and not sender._meta.abstract
+
+
+_TREE_FIELDS = ("path", "depth", "order")
+
+
+def _check_unchanged_tree_fields(sender, db_instance, instance) -> None:  # type: ignore[no-untyped-def]
+    """Guard against a hand-edited path/depth/order on a same-parent save.
+
+    BR-TREE-009: callers must not set ``path``/``depth``/``order`` manually.
+    A same-parent save (``parent_id`` unchanged) is the one case
+    ``handle_pre_save`` otherwise leaves untouched, so a hand-edited value
+    here would previously be written to the database with no signal at all
+    (icvoss/django-icv-tree#27).
+
+    When ``ICV_TREE_CHECK_ON_SAVE`` is true, any mismatch raises
+    ``TreeStructureError`` naming the field(s) and both values. When it is
+    false, a mismatch is logged once through the ``icv_tree`` logger and the
+    save proceeds unchanged: the caller's in-memory values stand, matching
+    behaviour prior to this fix, with a log line added.
+    """
+    from .conf import get_setting
+    from .exceptions import TreeStructureError
+
+    mismatches = [
+        (field, getattr(db_instance, field), getattr(instance, field))
+        for field in _TREE_FIELDS
+        if getattr(db_instance, field) != getattr(instance, field)
+    ]
+    if not mismatches:
+        return
+
+    field_names = ", ".join(field for field, _stored, _inmemory in mismatches)
+
+    if get_setting("ICV_TREE_CHECK_ON_SAVE", False):
+        details = "; ".join(
+            f"{field}: stored={stored!r} in-memory={inmemory!r}" for field, stored, inmemory in mismatches
+        )
+        raise TreeStructureError(
+            f"{sender._meta.label} pk={instance.pk!r} has a hand-edited "
+            f"{field_names} inconsistent with the stored row ({details}). "
+            "path/depth/order must not be set manually (BR-TREE-009)."
+        )
+
+    logger.warning(
+        "Hand-edited tree field(s) on a same-parent save were written unchanged",
+        extra={
+            "model": sender._meta.label,
+            "pk": instance.pk,
+            "fields": field_names,
+            "mismatches": {field: {"stored": stored, "in_memory": inmemory} for field, stored, inmemory in mismatches},
+        },
+    )
 
 
 def handle_pre_save(sender, instance, **kwargs) -> None:  # type: ignore[no-untyped-def]
@@ -140,10 +195,22 @@ def handle_pre_save(sender, instance, **kwargs) -> None:  # type: ignore[no-unty
             instance.depth = depth
             instance.path = _compute_new_path(parent_path, order, separator, step_length)
     else:
-        # Existing node: detect parent change.
+        # Existing node: detect parent change. Skipped entirely for raw
+        # saves (loaddata), which must be able to write path/depth/order
+        # values verbatim without triggering either the check or the log.
+        if kwargs.get("raw"):
+            return
+
         try:
             db_instance = sender.objects.get(pk=instance.pk)
         except sender.DoesNotExist:
+            return
+
+        if db_instance.parent_id == instance.parent_id:
+            # Same parent: path/depth/order must not have been hand-edited
+            # (BR-TREE-009). The DB row is already fetched above, so this
+            # comparison adds no query.
+            _check_unchanged_tree_fields(sender, db_instance, instance)
             return
 
         if db_instance.parent_id != instance.parent_id:

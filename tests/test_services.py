@@ -127,6 +127,53 @@ class TestMoveToValidation:
         child1.refresh_from_db()
         assert child1.path == original_path
 
+    def test_move_to_raises_on_unrelated_tree_model_target(self, tree_nodes):
+        """A target from an unrelated concrete tree model must raise.
+
+        Regression for icvoss/django-icv-tree#28. The fixture deliberately
+        gives ``root1`` (a ``SimpleTree`` row) and ``other_model_node`` (a
+        ``ScopedTree`` row) the same pk, forced explicitly rather than
+        relying on sqlite rowid reuse across two independently-empty
+        tables. This falsifies the old check ordering, where the pk-based
+        ``target.pk == node.pk`` self-check ran BEFORE the tree-model
+        comparison: with equal pks across unrelated models, the old code
+        raised "Cannot move a node to itself", the wrong error, for the
+        wrong reason, and this test would have passed against it anyway
+        without ever exercising the tree-model guard. Asserting the
+        tree-model message via ``match`` makes that impossible: the old
+        ordering's message does not contain "tree model".
+        """
+        from tree_testapp.models import Scope, ScopedTree
+
+        from icv_tree.exceptions import TreeStructureError
+
+        root1 = tree_nodes["root1"]
+
+        scope = Scope.objects.create(name="Scope A")
+        other_model_node = ScopedTree.objects.create(pk=root1.pk, name="other-root", scope=scope)
+
+        assert root1.pk == other_model_node.pk, (
+            "fixture must give node and target the same pk across unrelated models to falsify the old check ordering"
+        )
+        with pytest.raises(TreeStructureError, match="must resolve to the same tree model"):
+            root1.move_to(other_model_node, "last-child")
+
+    def test_move_to_succeeds_across_mti_subtypes(self, db):
+        """Control: two MTI subtypes of one base share one _tree_model().
+
+        RegularPage and RedirectPage both resolve to Page, so a move between
+        them must succeed, not raise, establishing that the new check is
+        keyed on _tree_model() equality rather than exact type equality.
+        """
+        from tree_testapp.models import RedirectPage, RegularPage
+
+        root = RegularPage.objects.create(name="root")
+        other_root = RedirectPage.objects.create(name="other-root", target_url="/elsewhere")
+
+        root.move_to(other_root, "last-child")
+        root.refresh_from_db()
+        assert root.parent_id == other_root.pk
+
     def test_move_to_reorders_source_siblings(self, tree_nodes):
         """Siblings after the removed position should have decremented order."""
         child1 = tree_nodes["child1"]
@@ -303,11 +350,123 @@ class TestRebuild:
         assert integrity["total_issues"] == 0
         assert result["nodes_updated"] > 0
 
+    def test_rebuild_leaves_already_correct_subtree_untouched(self, tree_nodes, simple_tree_model):
+        """rebuild() must not write placeholders to rows outside to_update.
+
+        Regression for icvoss/django-icv-tree#42. The fixture's two root
+        subtrees are independent: root1 (with child1/grandchild1/
+        grandchild2/child2) is corrupted via a raw QuerySet.update() that
+        bypasses icv-tree's own handlers, root2 (standalone) is left
+        untouched and consistent. Fails on old code: the old
+        ``_clear_paths_to_placeholders`` wrote ``__rebuild_<pk>__`` to
+        EVERY row in scope, including root2, via ``_unfiltered_qs`` with no
+        pk filter, so root2's path/depth/order tuple would no longer be
+        byte-identical after rebuild(), and nodes_unchanged would
+        undercount by root2's size (1) because root2 was corrupted by the
+        placeholder pass itself, after being loaded as already-correct.
+        """
+        root1 = tree_nodes["root1"]
+        root2 = tree_nodes["root2"]
+
+        # Corrupt only root1's subtree (root1, child1, child2, grandchild1,
+        # grandchild2), bypassing icv-tree's own handlers. root1's own
+        # `order` is deliberately left alone: `order` is the shared
+        # sibling-position field between root1 and root2, so corrupting it
+        # on root1 would legitimately change root2's *recomputed* sibling
+        # order too, which is not what this test is pinning. Corrupting
+        # `path`/`depth` alone is sufficient to exercise #42's regression
+        # (the placeholder pass clobbering `path` on every row in scope).
+        subtree_a_pks = [
+            tree_nodes["root1"].pk,
+            tree_nodes["child1"].pk,
+            tree_nodes["child2"].pk,
+            tree_nodes["grandchild1"].pk,
+            tree_nodes["grandchild2"].pk,
+        ]
+        for pk in subtree_a_pks:
+            simple_tree_model.objects.filter(pk=pk).update(path=f"CORRUPT_{pk}", depth=99)
+
+        # Snapshot subtree B (root2, which has no children) before rebuild.
+        root2.refresh_from_db()
+        subtree_b_before = [(root2.pk, root2.path, root2.depth, root2.order)]
+
+        result = simple_tree_model.objects.rebuild()
+
+        root2.refresh_from_db()
+        subtree_b_after = [(root2.pk, root2.path, root2.depth, root2.order)]
+        assert subtree_b_after == subtree_b_before
+
+        root1.refresh_from_db()
+        assert root1.path == "0001"
+        assert root1.depth == 0
+        assert root1.order == 0
+
+        assert result["nodes_unchanged"] == len(subtree_b_before)
+
     def test_rebuild_is_idempotent(self, tree_nodes, simple_tree_model):
         """Running rebuild() twice on a consistent tree should produce 0 updates."""
         simple_tree_model.objects.rebuild()
         result2 = simple_tree_model.objects.rebuild()
         assert result2["nodes_updated"] == 0
+
+    def test_rebuild_reports_zero_orphans_and_no_log_on_healthy_tree(self, tree_nodes, simple_tree_model, caplog):
+        """Control: a healthy tree reports nodes_orphaned=0 and logs nothing."""
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="icv_tree"):
+            result = simple_tree_model.objects.rebuild()
+
+        assert result["nodes_orphaned"] == 0
+        assert [r for r in caplog.records if r.name == "icv_tree"] == []
+
+    def test_rebuild_counts_and_logs_orphaned_rows(self, tree_nodes, simple_tree_model, caplog):
+        """A row whose parent_id is unreachable is counted, logged, and skipped.
+
+        Regression for icvoss/django-icv-tree#35 (pure-Python BFS path).
+        Fails on old code: 'nodes_orphaned' is absent from the returned
+        dict (KeyError), and no icv_tree log record is emitted.
+        """
+        import logging
+
+        root1 = tree_nodes["root1"]
+        child1 = tree_nodes["child1"]
+        grandchild1 = tree_nodes["grandchild1"]
+        grandchild1_pk = grandchild1.pk
+
+        # Delete child1 via raw SQL, bypassing CASCADE, so grandchild1 (and
+        # grandchild2) keep a dangling parent_id. grandchild2 is deleted too
+        # so only one orphan pk remains for a simple count assertion.
+        with connection.cursor() as cursor:
+            table = simple_tree_model._meta.db_table
+            pk_col = simple_tree_model._meta.pk.column
+            cursor.execute(
+                f"DELETE FROM {table} WHERE {pk_col} = %s",  # noqa: S608
+                [tree_nodes["grandchild2"].pk],
+            )
+            cursor.execute(
+                f"DELETE FROM {table} WHERE {pk_col} = %s",  # noqa: S608
+                [child1.pk],
+            )
+
+        with caplog.at_level(logging.WARNING, logger="icv_tree"):
+            result = simple_tree_model.objects.rebuild()
+
+        # Clean up the orphan so a PostgreSQL FK constraint check at
+        # teardown passes.
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f"DELETE FROM {table} WHERE {pk_col} = %s",  # noqa: S608
+                [grandchild1_pk],
+            )
+
+        assert result["nodes_orphaned"] == 1
+
+        icv_records = [r for r in caplog.records if r.name == "icv_tree"]
+        assert len(icv_records) == 1
+
+        # root1 and root2 are still correctly rebuilt despite the orphan.
+        root1.refresh_from_db()
+        assert root1.path == "0001"
 
     def test_rebuild_emits_tree_rebuilt_signal(self, tree_nodes, simple_tree_model, mocker):
         """tree_rebuilt signal should be emitted after rebuild()."""

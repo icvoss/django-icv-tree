@@ -65,6 +65,57 @@ class TestRebuildCteUnscoped:
         result2 = rebuild(simple_tree_model)
         assert result2["nodes_updated"] == 0
 
+    def test_cte_counts_and_logs_orphaned_rows(self, settings, tree_nodes, simple_tree_model, caplog):
+        """A row whose parent_id is unreachable by the recursive CTE is
+        counted, logged, and skipped rather than repaired.
+
+        Regression for icvoss/django-icv-tree#35 (CTE path). Fails on old
+        code: 'nodes_orphaned' is absent from the returned dict (KeyError),
+        and no icv_tree log record is emitted; the CTE's own
+        ``if computed is None: continue`` silently drops the row.
+        """
+        import logging
+
+        settings.ICV_TREE_ENABLE_CTE = True
+
+        root1 = tree_nodes["root1"]
+        child1 = tree_nodes["child1"]
+        grandchild1 = tree_nodes["grandchild1"]
+        grandchild1_pk = grandchild1.pk
+
+        # Delete child1 via raw SQL, bypassing CASCADE, so grandchild1 keeps
+        # a dangling parent_id. grandchild2 is deleted too so only one
+        # orphan pk remains for a simple count assertion.
+        with connection.cursor() as cursor:
+            table = simple_tree_model._meta.db_table
+            pk_col = simple_tree_model._meta.pk.column
+            cursor.execute(
+                f"DELETE FROM {table} WHERE {pk_col} = %s",  # noqa: S608
+                [tree_nodes["grandchild2"].pk],
+            )
+            cursor.execute(
+                f"DELETE FROM {table} WHERE {pk_col} = %s",  # noqa: S608
+                [child1.pk],
+            )
+
+        with caplog.at_level(logging.WARNING, logger="icv_tree"):
+            result = rebuild(simple_tree_model)
+
+        # Clean up the orphan so the FK constraint check at teardown passes.
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f"DELETE FROM {table} WHERE {pk_col} = %s",  # noqa: S608
+                [grandchild1_pk],
+            )
+
+        assert result["nodes_orphaned"] == 1
+
+        icv_records = [r for r in caplog.records if r.name == "icv_tree"]
+        assert len(icv_records) == 1
+
+        root1.refresh_from_db()
+        assert root1.path == "0001"
+
 
 @pytest.mark.django_db
 class TestRebuildCteScoped:

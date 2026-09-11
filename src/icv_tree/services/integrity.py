@@ -7,6 +7,7 @@ and consistency verification.
 
 from __future__ import annotations
 
+import logging
 import re
 import uuid
 from collections import deque
@@ -18,6 +19,8 @@ from django.db import connection, transaction
 
 if TYPE_CHECKING:
     from ..models import TreeNode
+
+logger = logging.getLogger("icv_tree")
 
 
 def _compute_new_path(
@@ -238,9 +241,16 @@ def _rebuild_cte(model: type, scope: Any = None) -> dict:
 
         all_nodes = list(_unfiltered_qs(model, scope_field=scope_field, scope=scope))
         to_update = []
+        orphaned_pks: list = []
         for node in all_nodes:
             computed = pk_to_computed.get(node.pk)
             if computed is None:
+                # parent_id references a row the recursive CTE never
+                # reached (a dangling FK, typically a hard delete that
+                # bypassed cascade). Counted and reported, not repaired:
+                # the reachable rows still rebuild correctly
+                # (icvoss/django-icv-tree#35).
+                orphaned_pks.append(node.pk)
                 continue
             new_order, new_path, new_depth = computed
             if node.path != new_path or node.depth != new_depth or node.order != new_order:
@@ -252,12 +262,27 @@ def _rebuild_cte(model: type, scope: Any = None) -> dict:
             else:
                 nodes_unchanged += 1
 
+        nodes_orphaned = len(orphaned_pks)
+        if orphaned_pks:
+            logger.warning(
+                "rebuild() found rows unreachable from any root",
+                extra={
+                    "model": model._meta.label,
+                    "scope": scope,
+                    "nodes_orphaned": nodes_orphaned,
+                    "orphaned_pks": orphaned_pks[:10],
+                },
+            )
+
         if to_update:
             # Clear paths to PK-based placeholders first to avoid
             # transient unique constraint violations during bulk_update.
-            # Restricted to the target scope so other scopes' rows (and
-            # their real paths) are never touched.
-            _clear_paths_to_placeholders(model, batch_size, scope_field=scope_field, scope=scope)
+            # Restricted to the rows about to be rewritten (and, as belt
+            # and braces, to the target scope), so already-correct rows
+            # never lose their real paths.
+            _clear_paths_to_placeholders(
+                model, [node.pk for node in to_update], batch_size, scope_field=scope_field, scope=scope
+            )
 
             qs = _unfiltered_qs(model, scope_field=scope_field, scope=scope)
             for i in range(0, len(to_update), batch_size):
@@ -266,7 +291,7 @@ def _rebuild_cte(model: type, scope: Any = None) -> dict:
                     ["path", "depth", "order"],
                 )
 
-    result = {"nodes_updated": nodes_updated, "nodes_unchanged": nodes_unchanged}
+    result = {"nodes_updated": nodes_updated, "nodes_unchanged": nodes_unchanged, "nodes_orphaned": nodes_orphaned}
 
     def _emit():  # type: ignore[no-untyped-def]
         tree_rebuilt.send(
@@ -315,6 +340,7 @@ def _unfiltered_qs(model: type, scope_field: str | None = None, scope: Any = Non
 
 def _clear_paths_to_placeholders(
     model: type,
+    pks: list,
     batch_size: int,
     scope_field: str | None = None,
     scope: Any = None,
@@ -324,33 +350,51 @@ def _clear_paths_to_placeholders(
     During rebuild, ``bulk_update`` writes new path values while old paths
     still exist in the table. When a unique constraint covers the path
     column, a new value can collide with an old value on a row that hasn't
-    been updated yet.  By first setting every path to a placeholder that
-    is guaranteed unique (derived from the PK), the subsequent real update
-    can proceed without constraint violations.
+    been updated yet. By first setting the paths of the rows about to be
+    rewritten to a placeholder that is guaranteed unique (derived from the
+    PK), the subsequent real update can proceed without constraint
+    violations.
 
-    Uses a single UPDATE ... SET path = '__rebuild_' || pk || '__' so the
-    operation is fast even for large tables, and does NOT mutate in-memory
-    node objects.
+    Only clears rows in ``pks`` (the rows in ``to_update``), not every row
+    in scope. An unchanged row's final path is, by definition, already
+    equal to its current path, and the full set of final paths computed by
+    rebuild is unique (one root numbering per scope, one path per sibling
+    order), so an updated row's final path cannot collide with an
+    unchanged row's current path. An unchanged row therefore never needs a
+    placeholder; clearing it would only cost writes and leave it
+    permanently on a placeholder if it were ever omitted from the
+    following bulk_update pass.
+
+    Uses ``UPDATE ... WHERE pk IN (...) SET path = '__rebuild_' || pk ||
+    '__'``, batched, so the operation is fast even for large tables, and
+    does NOT mutate in-memory node objects.
 
     Args:
         model: A concrete TreeNode subclass.
-        batch_size: Unused here (kept for signature symmetry with callers);
-            the placeholder clear is a single UPDATE regardless of table size.
-        scope_field: When given (together with ``scope``), only rows in
-            that scope are cleared. Rows in other scopes keep their real
-            paths untouched, which is safe because the uniqueness
-            constraint on a scoped model covers ``(scope_field, path)``,
-            not ``path`` alone. A placeholder in one scope can therefore
-            never collide with a real path in a different scope.
+        pks: Primary keys of the rows to clear (the rows about to be
+            rewritten by the caller's subsequent bulk_update).
+        batch_size: Number of pks to clear per UPDATE statement.
+        scope_field: When given (together with ``scope``), clearing is
+            additionally restricted to that scope as belt and braces. Rows
+            in other scopes keep their real paths untouched, which is safe
+            because the uniqueness constraint on a scoped model covers
+            ``(scope_field, path)``, not ``path`` alone. A placeholder in
+            one scope can therefore never collide with a real path in a
+            different scope.
         scope: The scope value to restrict clearing to. Ignored if
             ``scope_field`` is None.
     """
     from django.db.models import CharField, Value
     from django.db.models.functions import Cast, Concat
 
-    _unfiltered_qs(model, scope_field=scope_field, scope=scope).update(
-        path=Concat(Value("__rebuild_"), Cast("pk", CharField()), Value("__")),
-    )
+    if not pks:
+        return
+
+    qs = _unfiltered_qs(model, scope_field=scope_field, scope=scope)
+    for i in range(0, len(pks), batch_size):
+        qs.filter(pk__in=pks[i : i + batch_size]).update(
+            path=Concat(Value("__rebuild_"), Cast("pk", CharField()), Value("__")),
+        )
 
 
 def _get_scope_value(node: TreeNode, scope_field: str | None):  # type: ignore[no-untyped-def]
@@ -367,10 +411,17 @@ def _rebuild_scoped(  # noqa: C901
     separator: str,
     step_length: int,
     scope_field: str | None,
-) -> tuple[list, int, int]:
+    all_nodes: list,
+) -> tuple[list, int, int, list]:
     """Run BFS rebuild over a set of roots, numbering paths from 0.
 
-    Returns (to_update, nodes_updated, nodes_unchanged).
+    ``all_nodes`` is every loaded row for the target scope (or the whole
+    model when unscoped); any pk in it that the BFS never dequeues has a
+    ``parent_id`` unreachable from any root (a dangling FK, typically a
+    hard delete that bypassed cascade) and is reported as orphaned rather
+    than repaired (icvoss/django-icv-tree#35).
+
+    Returns (to_update, nodes_updated, nodes_unchanged, orphaned_pks).
     """
     nodes_updated = 0
     nodes_unchanged = 0
@@ -425,7 +476,8 @@ def _rebuild_scoped(  # noqa: C901
                 nodes_unchanged += 1
             queue.append(child)
 
-    return to_update, nodes_updated, nodes_unchanged
+    orphaned_pks = [node.pk for node in all_nodes if node.pk not in computed]
+    return to_update, nodes_updated, nodes_unchanged, orphaned_pks
 
 
 def rebuild(model: type, scope: Any = None) -> dict:
@@ -452,6 +504,10 @@ def rebuild(model: type, scope: Any = None) -> dict:
         Dict with keys:
           - nodes_updated: int
           - nodes_unchanged: int
+          - nodes_orphaned: int, rows whose parent_id is unreachable from
+            any root (icvoss/django-icv-tree#35). Never repaired by this
+            call; reachable rows are still rebuilt correctly. A warning is
+            logged through the ``icv_tree`` logger when this is non-zero.
 
     Raises:
         ImproperlyConfigured: If scope is not None but the model does not
@@ -490,21 +546,37 @@ def rebuild(model: type, scope: Any = None) -> dict:
             parent_to_children.setdefault(pid, []).append(node)
 
         roots = parent_to_children.get(None, [])
-        to_update, nodes_updated, nodes_unchanged = _rebuild_scoped(
+        to_update, nodes_updated, nodes_unchanged, orphaned_pks = _rebuild_scoped(
             model,
             roots,
             parent_to_children,
             separator,
             step_length,
             scope_field,
+            all_nodes,
         )
+
+        nodes_orphaned = len(orphaned_pks)
+        if orphaned_pks:
+            logger.warning(
+                "rebuild() found rows unreachable from any root",
+                extra={
+                    "model": model._meta.label,
+                    "scope": scope,
+                    "nodes_orphaned": nodes_orphaned,
+                    "orphaned_pks": orphaned_pks[:10],
+                },
+            )
 
         if to_update:
             # Clear paths to PK-based placeholders first to avoid
             # transient unique constraint violations during bulk_update.
-            # Restricted to the target scope so other scopes' rows (and
-            # their real paths) are never touched.
-            _clear_paths_to_placeholders(model, batch_size, scope_field=scope_field, scope=scope)
+            # Restricted to the rows about to be rewritten (and, as belt
+            # and braces, to the target scope), so already-correct rows
+            # never lose their real paths.
+            _clear_paths_to_placeholders(
+                model, [node.pk for node in to_update], batch_size, scope_field=scope_field, scope=scope
+            )
 
             # Now write the final computed paths.
             for i in range(0, len(to_update), batch_size):
@@ -513,7 +585,7 @@ def rebuild(model: type, scope: Any = None) -> dict:
                     ["path", "depth", "order"],
                 )
 
-    result = {"nodes_updated": nodes_updated, "nodes_unchanged": nodes_unchanged}
+    result = {"nodes_updated": nodes_updated, "nodes_unchanged": nodes_unchanged, "nodes_orphaned": nodes_orphaned}
 
     def _emit():  # type: ignore[no-untyped-def]
         from ..signals import tree_rebuilt

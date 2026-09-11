@@ -348,6 +348,8 @@ def move_to(
 
     Raises:
         TreeStructureError: If position is not one of the four valid values.
+        TreeStructureError: If target does not resolve to the same
+            ``_tree_model()`` as node.
         TreeStructureError: If target is node itself or a descendant of node.
 
     Side effects:
@@ -373,6 +375,21 @@ def move_to(
     # multi-table-inheritance subtypes share one path/order namespace.
     tree_model = node._tree_model()
     tree_objects = tree_model._default_manager
+
+    # Tree-model check: target must resolve to the same base tree model as
+    # node. Two MTI subtypes of one base (e.g. RegularPage/RedirectPage
+    # under Page) share one _tree_model() and are valid; an unrelated
+    # concrete tree model passed as target previously produced no error,
+    # only a silently wrong query result (icvoss/django-icv-tree#28). This
+    # must run before the pk-based cycle checks below: two unrelated tree
+    # models can share pk values, so a cross-model target with a
+    # coincidentally equal pk would otherwise be misreported as "move to
+    # itself" by the self-check instead of the real tree-model mismatch.
+    if target._tree_model() is not tree_model:
+        raise TreeStructureError(
+            f"Cannot move node of type '{node._tree_model()._meta.label}' to a target of type "
+            f"'{target._tree_model()._meta.label}': target and node must resolve to the same tree model."
+        )
 
     # Cycle prevention.
     if target.pk == node.pk:
