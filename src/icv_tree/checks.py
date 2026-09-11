@@ -176,8 +176,7 @@ def check_path_uniqueness(app_configs=None, **kwargs):  # type: ignore[no-untype
 
         expected_repr = ", ".join(sorted(expected))
         constraint_hint = (
-            f'models.UniqueConstraint(fields=["{scope_field}", "path"], '
-            f'name="unique_{model._meta.model_name}_path")'
+            f'models.UniqueConstraint(fields=["{scope_field}", "path"], name="unique_{model._meta.model_name}_path")'
             if scope_field
             else f'models.UniqueConstraint(fields=["path"], name="unique_{model._meta.model_name}_path")'
         )
