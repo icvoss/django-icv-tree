@@ -208,6 +208,80 @@ class TestMoveToSignal:
 
 
 @pytest.mark.django_db
+class TestSaveDrivenMoveToRootSignal:
+    """Regression for icvoss/django-icv-tree#34.
+
+    handle_pre_save()'s existing-node branch delegates a save-driven parent
+    change to move_to() when the new parent is not None, and move_to() sends
+    node_moved after commit. When the new parent IS None (a save-driven move
+    to root), the handler instead performed the move inline with no call to
+    move_to() and no signal at all. Patches transaction.on_commit the same
+    way TestMoveToSignal does, so the same non-transactional test boundary
+    still observes the post-commit signal.
+    """
+
+    def test_save_driven_move_to_root_emits_node_moved_once(self, tree_nodes, mocker):
+        """A save-driven move to root must fire node_moved exactly once.
+
+        Fails on old code: the inline root-move branch in handle_pre_save
+        never calls move_to() and never sends node_moved, so received stays
+        empty.
+        """
+        from icv_tree.signals import node_moved
+
+        mocker.patch(
+            "icv_tree.services.mutations.transaction.on_commit",
+            side_effect=lambda fn: fn(),
+        )
+
+        received = []
+
+        def handler(sender, **kwargs):  # type: ignore[no-untyped-def]
+            received.append(kwargs)
+
+        node_moved.connect(handler)
+        try:
+            child1 = tree_nodes["child1"]
+            root1 = tree_nodes["root1"]
+            old_path = child1.path
+            child1.parent = None
+            child1.save()
+        finally:
+            node_moved.disconnect(handler)
+
+        assert len(received) == 1
+        kwargs = received[0]
+        assert kwargs["instance"].pk == child1.pk
+        assert kwargs["old_parent"].pk == root1.pk
+        assert kwargs["new_parent"] is None
+        assert kwargs["old_path"] == old_path
+
+    def test_non_move_save_does_not_emit_node_moved(self, tree_nodes, mocker):
+        """Control: saving a node with an unchanged parent must not fire node_moved."""
+        from icv_tree.signals import node_moved
+
+        mocker.patch(
+            "icv_tree.services.mutations.transaction.on_commit",
+            side_effect=lambda fn: fn(),
+        )
+
+        received = []
+
+        def handler(sender, **kwargs):  # type: ignore[no-untyped-def]
+            received.append(kwargs)
+
+        node_moved.connect(handler)
+        try:
+            child1 = tree_nodes["child1"]
+            child1.name = "child1-renamed"
+            child1.save()
+        finally:
+            node_moved.disconnect(handler)
+
+        assert received == []
+
+
+@pytest.mark.django_db
 class TestRebuild:
     """Test rebuild() service.
 

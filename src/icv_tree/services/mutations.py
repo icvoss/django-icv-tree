@@ -69,6 +69,56 @@ def _compute_new_path(
     return parent_path + separator + step
 
 
+def _send_node_moved(
+    tree_model: type,
+    tree_objects,
+    node: TreeNode,
+    old_parent_instance: TreeNode | None,
+    new_parent_id,
+    old_path: str,
+) -> None:
+    """Send node_moved after commit, with the same payload move_to() uses.
+
+    Shared by move_to() and handle_pre_save()'s save-driven move-to-root
+    branch (icvoss/django-icv-tree#34), so both structural-move paths emit
+    the signal identically: after commit, with sender the resolved
+    _tree_model() base, instance the node (post-move), old_parent/new_parent
+    (resolved instances or None), and old_path.
+
+    Args:
+        tree_model: The resolved _tree_model() base (the signal's sender).
+        tree_objects: That model's default manager, used to re-fetch
+            new_parent_id if it is not None.
+        node: The moved node, already updated in-memory to its new state.
+        old_parent_instance: The node's parent before the move, or None.
+        new_parent_id: The node's new parent's pk, or None for a root move.
+        old_path: The node's path before the move.
+
+    Side effects:
+        Registers a transaction.on_commit() callback that sends node_moved.
+    """
+    from ..signals import node_moved
+
+    if new_parent_id is not None:
+        try:
+            new_parent_instance = tree_objects.get(pk=new_parent_id)
+        except tree_model.DoesNotExist:
+            new_parent_instance = None
+    else:
+        new_parent_instance = None
+
+    def _emit() -> None:
+        node_moved.send(
+            sender=tree_model,
+            instance=node,
+            old_parent=old_parent_instance,
+            new_parent=new_parent_instance,
+            old_path=old_path,
+        )
+
+    transaction.on_commit(_emit)
+
+
 def _insert_node(
     node: TreeNode,
     parent: TreeNode | None,
@@ -309,7 +359,6 @@ def move_to(
         - No-op if move would produce no structural change
     """
     from ..conf import get_setting
-    from ..signals import node_moved
 
     if position not in _VALID_POSITIONS:
         raise TreeStructureError(
@@ -360,11 +409,20 @@ def move_to(
     old_order = node.order
     old_parent_instance = node.parent if node.parent_id is not None else None
 
+    # On a scoped model, restrict every collection below to the moved
+    # node's own scope, matching the discipline get_ancestors()/
+    # get_descendants()/get_root() already apply (BR-TREE-052). Without
+    # this, a colliding path or a shared parent_id=None root value can
+    # pull another scope's rows into this move (icvoss/django-icv-tree#33).
+    # Empty dict on an unscoped model, so this is a no-op there.
+    scope_filter = node._scope_filter()
+
     with transaction.atomic():
         # Collect the node's descendants (before we change paths).
         descendants = list(
             tree_objects.filter(
                 path__startswith=old_path + separator,
+                **scope_filter,
             ).order_by("path")
         )
 
@@ -394,6 +452,7 @@ def move_to(
             tree_objects.filter(
                 parent_id=old_parent_id,
                 order__gt=old_order,
+                **scope_filter,
             ).order_by("order")  # ascending: lower paths updated first
         )
         for sib in source_siblings_after:
@@ -443,6 +502,7 @@ def move_to(
             tree_objects.filter(
                 parent_id=new_parent_id,
                 order__gte=new_order,
+                **scope_filter,
             ).order_by("-order")  # DESCENDING: update highest path first to avoid collision
         )
         for sib in dest_siblings_at_or_after:
@@ -512,24 +572,7 @@ def move_to(
                 tree_objects.bulk_update(descendants[i : i + batch_size], ["path", "depth"])
 
     # Emit signal after commit.
-    if new_parent_id is not None:
-        try:
-            new_parent_instance = tree_objects.get(pk=new_parent_id)
-        except tree_model.DoesNotExist:
-            new_parent_instance = None
-    else:
-        new_parent_instance = None
-
-    def _emit() -> None:
-        node_moved.send(
-            sender=tree_model,
-            instance=node,
-            old_parent=old_parent_instance,
-            new_parent=new_parent_instance,
-            old_path=old_path,
-        )
-
-    transaction.on_commit(_emit)
+    _send_node_moved(tree_model, tree_objects, node, old_parent_instance, new_parent_id, old_path)
 
 
 def reorder_siblings(model: type, ordered_ids: list) -> None:

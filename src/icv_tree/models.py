@@ -490,11 +490,22 @@ class TreeNode(models.Model):
 
         Side effects:
             One DB COUNT query.
+
+        Note:
+            When the model defines ``tree_scope_field``, the count is also
+            restricted to this node's own scope value, matching
+            ``get_descendants()``. Without this, a path-prefix collision
+            with another scope (paths are numbered independently per scope)
+            could otherwise inflate the count with that other scope's rows.
         """
         from .conf import get_setting
 
         separator = get_setting("ICV_TREE_PATH_SEPARATOR", "/")
-        return self._tree_objects().filter(path__startswith=self.path + separator).count()
+        return (
+            self._tree_objects()
+            .filter(path__startswith=self.path + separator, **self._scope_filter())
+            .count()
+        )
 
     def move_to(
         self,
