@@ -132,9 +132,9 @@ class TestMoveToValidation:
 
         Regression for icvoss/django-icv-tree#28. The fixture deliberately
         gives ``root1`` (a ``SimpleTree`` row) and ``other_model_node`` (a
-        ``ScopedTree`` row) the same pk: both tables are empty at the start
-        of this test, so each model's first row lands on pk=1 independently.
-        This falsifies the old check ordering, where the pk-based
+        ``ScopedTree`` row) the same pk, forced explicitly rather than
+        relying on sqlite rowid reuse across two independently-empty
+        tables. This falsifies the old check ordering, where the pk-based
         ``target.pk == node.pk`` self-check ran BEFORE the tree-model
         comparison: with equal pks across unrelated models, the old code
         raised "Cannot move a node to itself", the wrong error, for the
@@ -147,13 +147,13 @@ class TestMoveToValidation:
 
         from icv_tree.exceptions import TreeStructureError
 
-        scope = Scope.objects.create(name="Scope A")
-        other_model_node = ScopedTree.objects.create(name="other-root", scope=scope)
-
         root1 = tree_nodes["root1"]
+
+        scope = Scope.objects.create(name="Scope A")
+        other_model_node = ScopedTree.objects.create(pk=root1.pk, name="other-root", scope=scope)
+
         assert root1.pk == other_model_node.pk, (
-            "fixture must give node and target the same pk across unrelated "
-            "models to falsify the old check ordering"
+            "fixture must give node and target the same pk across unrelated models to falsify the old check ordering"
         )
         with pytest.raises(TreeStructureError, match="must resolve to the same tree model"):
             root1.move_to(other_model_node, "last-child")
@@ -369,7 +369,13 @@ class TestRebuild:
         root2 = tree_nodes["root2"]
 
         # Corrupt only root1's subtree (root1, child1, child2, grandchild1,
-        # grandchild2), bypassing icv-tree's own handlers.
+        # grandchild2), bypassing icv-tree's own handlers. root1's own
+        # `order` is deliberately left alone: `order` is the shared
+        # sibling-position field between root1 and root2, so corrupting it
+        # on root1 would legitimately change root2's *recomputed* sibling
+        # order too, which is not what this test is pinning. Corrupting
+        # `path`/`depth` alone is sufficient to exercise #42's regression
+        # (the placeholder pass clobbering `path` on every row in scope).
         subtree_a_pks = [
             tree_nodes["root1"].pk,
             tree_nodes["child1"].pk,
@@ -378,7 +384,7 @@ class TestRebuild:
             tree_nodes["grandchild2"].pk,
         ]
         for pk in subtree_a_pks:
-            simple_tree_model.objects.filter(pk=pk).update(path=f"CORRUPT_{pk}", depth=99, order=99)
+            simple_tree_model.objects.filter(pk=pk).update(path=f"CORRUPT_{pk}", depth=99)
 
         # Snapshot subtree B (root2, which has no children) before rebuild.
         root2.refresh_from_db()
