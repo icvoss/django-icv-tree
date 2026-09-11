@@ -78,7 +78,7 @@ def _built_state():
     return ProjectState.from_apps(global_apps)
 
 
-@pytest.mark.django_db(databases=["other"])
+@pytest.mark.django_db(databases=["other"], transaction=True)
 class TestPathIndexRouterGuard:
     """Prove PathIndex consults allow_migrate_model before executing SQL."""
 
@@ -96,9 +96,7 @@ class TestPathIndexRouterGuard:
         index_name = operation.index_name
 
         with connections["other"].schema_editor() as schema_editor:
-            operation.database_forwards(
-                "tree_testapp", schema_editor, _built_state, _built_state
-            )
+            operation.database_forwards("tree_testapp", schema_editor, _built_state, _built_state)
 
         assert not _index_exists("other", index_name)
 
@@ -116,9 +114,7 @@ class TestPathIndexRouterGuard:
         index_name = operation.index_name
 
         with connections["other"].schema_editor() as schema_editor:
-            operation.database_forwards(
-                "tree_testapp", schema_editor, _built_state, _built_state
-            )
+            operation.database_forwards("tree_testapp", schema_editor, _built_state, _built_state)
 
         assert _index_exists("other", index_name)
 
@@ -136,17 +132,13 @@ class TestPathIndexRouterGuard:
         index_name = operation.index_name
 
         with connections["other"].schema_editor() as schema_editor:
-            operation.database_forwards(
-                "tree_testapp", schema_editor, _built_state, _built_state
-            )
+            operation.database_forwards("tree_testapp", schema_editor, _built_state, _built_state)
         assert _index_exists("other", index_name)
 
         _patched_routers([_RefuseTreeTestapp(refused_alias="other")])
 
         with connections["other"].schema_editor() as schema_editor:
-            operation.database_backwards(
-                "tree_testapp", schema_editor, _built_state, _built_state
-            )
+            operation.database_backwards("tree_testapp", schema_editor, _built_state, _built_state)
 
         assert _index_exists("other", index_name)
 
@@ -162,15 +154,11 @@ class TestPathIndexRouterGuard:
         index_name = operation.index_name
 
         with connections["other"].schema_editor() as schema_editor:
-            operation.database_forwards(
-                "tree_testapp", schema_editor, _built_state, _built_state
-            )
+            operation.database_forwards("tree_testapp", schema_editor, _built_state, _built_state)
         assert _index_exists("other", index_name)
 
         with connections["other"].schema_editor() as schema_editor:
-            operation.database_backwards(
-                "tree_testapp", schema_editor, _built_state, _built_state
-            )
+            operation.database_backwards("tree_testapp", schema_editor, _built_state, _built_state)
 
         assert not _index_exists("other", index_name)
 
@@ -214,9 +202,7 @@ class TestPathIndexVendorFromSchemaEditor:
         fake_connection = _FakeConnection(alias="default", vendor="postgresql")
         fake_schema_editor = _FakeSchemaEditor(fake_connection)
 
-        operation.database_forwards(
-            "tree_testapp", fake_schema_editor, _built_state, _built_state
-        )
+        operation.database_forwards("tree_testapp", fake_schema_editor, _built_state, _built_state)
 
         assert len(fake_schema_editor.executed) == 1
         assert "text_pattern_ops" in fake_schema_editor.executed[0]
