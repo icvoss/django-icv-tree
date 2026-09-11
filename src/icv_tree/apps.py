@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from django.apps import AppConfig
+from django.core.checks import Tags, register
 from django.core.exceptions import ImproperlyConfigured
 from django.utils.translation import gettext_lazy as _
 
@@ -26,6 +27,14 @@ class IcvTreeConfig(AppConfig):
         handlers._connect_tree_handlers()
 
         self._validate_settings(get_setting)
+
+        # icv_tree.W001: concrete TreeNode subclasses without a uniqueness
+        # constraint on path (icvoss/django-icv-tree#31). Inspects only Meta
+        # declarations, so it is cheap enough to run on every check/migrate,
+        # unlike check_all_tree_models (E001/E002), which is not registered.
+        from .checks import check_path_uniqueness
+
+        register(check_path_uniqueness, Tags.models)
 
     @staticmethod
     def _validate_settings(get_setting) -> None:  # type: ignore[no-untyped-def]

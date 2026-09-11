@@ -1,16 +1,25 @@
 """
 Django system checks for icv-tree.
 
-NOT auto-registered with the check framework — the integrity queries are too
-expensive to run on every ``runserver``, ``migrate``, or even
-``check --database``.  Instead, invoke explicitly via::
+Two kinds of check live here, with different registration and cost profiles.
+
+``check_all_tree_models`` (E001/E002) is NOT auto-registered with the check
+framework: the integrity queries are too expensive to run on every
+``runserver``, ``migrate``, or even ``check --database``. Instead, invoke
+explicitly via::
 
     manage.py icv_tree_rebuild --check
 
 or call ``check_all_tree_models()`` directly in your own check / CI step.
 
-E001 — Warning: orphaned nodes (parent_id references missing rows)
-E002 — Error: path inconsistencies (depth mismatch, prefix violation, duplicate paths)
+``check_path_uniqueness`` (W001) IS auto-registered (see ``apps.py``): it only
+inspects ``Meta.constraints``/``Meta.unique_together`` declarations, so it is
+cheap enough to run on every ``check`` and ``migrate``.
+
+E001: Warning, orphaned nodes (parent_id references missing rows)
+E002: Error, path inconsistencies (depth mismatch, prefix violation, duplicate paths)
+W000: Warning, integrity check itself failed to run (e.g. table missing)
+W001: Warning, concrete model declares no uniqueness constraint on path
 """
 
 from __future__ import annotations
@@ -19,29 +28,39 @@ from django.apps import apps
 from django.core.checks import Error, Warning
 
 
+def _installed_tree_models() -> list:  # type: ignore[type-arg]
+    """Return concrete, installed TreeNode subclasses that have not opted out.
+
+    Shared discovery loop for ``check_all_tree_models`` and
+    ``check_path_uniqueness``. Consuming models may opt out of either check by
+    setting ``check_tree_integrity = False`` on the model class (BR-TREE-043).
+    """
+    from .models import TreeNode
+
+    return [
+        model
+        for model in apps.get_models()
+        if issubclass(model, TreeNode) and not model._meta.abstract and getattr(model, "check_tree_integrity", True)
+    ]
+
+
 def check_all_tree_models(app_configs=None, databases=None, **kwargs):  # type: ignore[no-untyped-def]
     """Check all concrete TreeNode subclasses for tree integrity issues.
 
     Generates:
-      icv_tree.E001 Warning — orphaned nodes
-      icv_tree.E002 Error   — path inconsistencies
+      icv_tree.E001 Warning, orphaned nodes
+      icv_tree.E002 Error, path inconsistencies
 
     Consuming models may opt out by setting ``check_tree_integrity = False``
     on the model class (BR-TREE-043).
 
     Not auto-registered.  Call directly or from a management command.
     """
-    from .models import TreeNode
     from .services.integrity import check_tree_integrity
 
     errors: list = []
 
-    # Find all concrete (non-abstract) TreeNode subclasses that are installed.
-    tree_models = [
-        model
-        for model in apps.get_models()
-        if issubclass(model, TreeNode) and not model._meta.abstract and getattr(model, "check_tree_integrity", True)
-    ]
+    tree_models = _installed_tree_models()
 
     for model in tree_models:
         # When called with databases (e.g. from the check framework),
@@ -92,3 +111,87 @@ def check_all_tree_models(app_configs=None, databases=None, **kwargs):  # type: 
             )
 
     return errors
+
+
+def _constrained_field_sets(model) -> list[frozenset[str]]:  # type: ignore[no-untyped-def]
+    """Return every field set covered by a UniqueConstraint or unique_together on model.
+
+    Each entry is a frozenset of field names. Only plain field names are
+    considered (a UniqueConstraint's ``fields``, not its ``expressions``, and
+    not a partial constraint's ``condition``): the field-set comparison in
+    ``check_path_uniqueness`` needs a name-for-name match, so an
+    expression-only or conditional constraint cannot satisfy it and is
+    excluded rather than mis-read.
+    """
+    field_sets: list[frozenset[str]] = []
+
+    for constraint in model._meta.constraints:
+        fields = getattr(constraint, "fields", None)
+        if fields:
+            field_sets.append(frozenset(fields))
+
+    for group in model._meta.unique_together:
+        field_sets.append(frozenset(group))
+
+    return field_sets
+
+
+def check_path_uniqueness(app_configs=None, **kwargs):  # type: ignore[no-untyped-def]
+    """Warn when a concrete TreeNode subclass declares no uniqueness constraint on path.
+
+    The abstract ``path`` field carries ``db_index=True`` only, not
+    ``unique=True`` (a plain unique on path in the abstract Meta is wrong for
+    scoped models, and would force a migration on every consumer). Uniqueness
+    is therefore a constraint the concrete model must declare itself: a
+    ``UniqueConstraint``/``unique_together`` whose field set is exactly
+    ``{"path"}`` for an unscoped model, or exactly
+    ``{tree_scope_field, "path"}`` for a model with ``tree_scope_field`` set.
+    Without it, two concurrent inserts under the same parent that compute the
+    same order (and therefore the same path) are both written successfully,
+    silently (icvoss/django-icv-tree#31).
+
+    This is a Warning, not an Error, for this release: icv-media's
+    MediaFolder declares no such constraint today, and an Error would block
+    its migrate on upgrade (icvoss/icv-media#72). It is promoted to an Error
+    at the next major release, once consumers have adopted the constraint.
+
+    Consuming models may opt out by setting ``check_tree_integrity = False``
+    on the model class (BR-TREE-043), the same attribute
+    ``check_all_tree_models`` honours: both checks answer "is this model's
+    tree data trustworthy", so a model that has opted out of one has opted
+    out of the other.
+
+    Auto-registered on the ``models`` tag (see ``apps.py``): unlike
+    ``check_all_tree_models``, this check only inspects Meta declarations, so
+    it is cheap enough to run on every ``check`` and ``migrate``.
+    """
+    warnings: list = []
+
+    for model in _installed_tree_models():
+        scope_field = getattr(model, "tree_scope_field", None)
+        expected = frozenset({scope_field, "path"}) if scope_field else frozenset({"path"})
+
+        if expected in _constrained_field_sets(model):
+            continue
+
+        expected_repr = ", ".join(sorted(expected))
+        constraint_hint = (
+            f'models.UniqueConstraint(fields=["{scope_field}", "path"], name="unique_{model._meta.model_name}_path")'
+            if scope_field
+            else f'models.UniqueConstraint(fields=["path"], name="unique_{model._meta.model_name}_path")'
+        )
+
+        warnings.append(
+            Warning(
+                f"{model.__name__} declares no uniqueness constraint covering exactly "
+                f"{{{expected_repr}}} on its path field.",
+                hint=(
+                    f"Add to {model.__name__}.Meta.constraints: {constraint_hint}. "
+                    f"Opt out with check_tree_integrity = False on the model if this is intentional."
+                ),
+                id="icv_tree.W001",
+                obj=model,
+            )
+        )
+
+    return warnings

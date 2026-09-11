@@ -86,6 +86,149 @@ class TestSystemChecks:
         assert len(opt_out_errors) == 0
 
 
+class TestCheckPathUniqueness:
+    """Test check_path_uniqueness (icv_tree.W001, icvoss/django-icv-tree#31).
+
+    Called directly rather than via registry.run_checks(): on Django 6.1,
+    run_checks() also runs database checks and trips the "no queries during
+    checks" guard, per project-standards LESSONS.md. check_path_uniqueness
+    itself only inspects Meta declarations, so it needs no database access
+    and no @pytest.mark.django_db.
+    """
+
+    def test_unconstrained_unscoped_model_warns(self):
+        """A concrete model with no constraint on path yields icv_tree.W001.
+
+        SimpleTree (tree_testapp) declares no UniqueConstraint or
+        unique_together at all, so it is the naturally occurring fixture for
+        the missing-constraint case; no throwaway model needed.
+
+        Teeth: this assertion fails on pre-#31 code because
+        check_path_uniqueness does not exist yet (ImportError), not because
+        of any behavioural difference; that is expected for a new check.
+        """
+        from tree_testapp.models import SimpleTree
+
+        from icv_tree.checks import check_path_uniqueness
+
+        warnings = check_path_uniqueness()
+        simple_tree_warnings = [w for w in warnings if getattr(w, "obj", None) is SimpleTree]
+
+        assert len(simple_tree_warnings) == 1
+        assert simple_tree_warnings[0].id == "icv_tree.W001"
+        assert "SimpleTree" in simple_tree_warnings[0].msg
+        assert "path" in simple_tree_warnings[0].msg
+        assert "UniqueConstraint" in simple_tree_warnings[0].hint
+
+    def test_scoped_model_with_unique_together_on_scope_and_path_is_silent(self):
+        """ScopedTree declares unique_together = (scope, path); no warning.
+
+        ScopedTree.tree_scope_field = "scope", and its Meta declares
+        unique_together = [("scope", "path")], which is exactly the expected
+        field set for a scoped model. This is the naturally occurring
+        satisfying fixture; no throwaway model needed.
+        """
+        from tree_testapp.models import ScopedTree
+
+        from icv_tree.checks import check_path_uniqueness
+
+        warnings = check_path_uniqueness()
+        scoped_tree_warnings = [w for w in warnings if getattr(w, "obj", None) is ScopedTree]
+
+        assert scoped_tree_warnings == []
+
+    def test_unscoped_model_with_unique_constraint_on_path_is_silent(self):
+        """A throwaway unscoped model with UniqueConstraint(fields=["path"]) is silent.
+
+        Registered directly on the tree_testapp app_label, mirroring the
+        late-defined-model pattern in test_signal_connection.py, and removed
+        in a finally block so it does not leak into other tests that
+        enumerate installed TreeNode subclasses (e.g. check_all_tree_models,
+        _connect_tree_handlers).
+        """
+        from django.apps import apps
+        from django.db import models
+
+        from icv_tree.checks import check_path_uniqueness
+        from icv_tree.models import TreeNode
+
+        class ConstrainedUnscopedTree(TreeNode):
+            name = models.CharField(max_length=100)
+
+            class Meta:
+                app_label = "tree_testapp"
+                db_table = "tree_testapp_constrainedunscopedtree"
+                constraints = [
+                    models.UniqueConstraint(fields=["path"], name="unique_constrainedunscopedtree_path"),
+                ]
+
+        try:
+            warnings = check_path_uniqueness()
+            model_warnings = [w for w in warnings if getattr(w, "obj", None) is ConstrainedUnscopedTree]
+            assert model_warnings == []
+        finally:
+            apps.all_models["tree_testapp"].pop("constrainedunscopedtree", None)
+            apps.clear_cache()
+
+    def test_scoped_model_with_constraint_on_path_only_still_warns(self):
+        """A scoped model whose constraint covers only path (not scope) still warns.
+
+        The field set must equal exactly {tree_scope_field, "path"} for a
+        scoped model; a UniqueConstraint(fields=["path"]) alone is the wrong
+        field set (it does not prevent cross-scope path collisions), so this
+        must still produce icv_tree.W001.
+
+        Teeth: if the field-set comparison were loosened to "path appears in
+        any constraint" rather than an exact set match, this assertion is the
+        one that would start failing (the model would wrongly go silent),
+        because {"path"} would satisfy a containment check even though it is
+        missing the scope field.
+        """
+        from django.apps import apps
+        from django.db import models
+
+        from icv_tree.checks import check_path_uniqueness
+        from icv_tree.models import TreeNode
+
+        class WrongFieldSetScopedTree(TreeNode):
+            tree_scope_field = "scope"
+
+            name = models.CharField(max_length=100)
+            scope = models.ForeignKey(
+                "tree_testapp.Scope",
+                on_delete=models.CASCADE,
+                related_name="wrong_field_set_scoped_nodes",
+            )
+
+            class Meta:
+                app_label = "tree_testapp"
+                db_table = "tree_testapp_wrongfieldsetscopedtree"
+                constraints = [
+                    models.UniqueConstraint(fields=["path"], name="unique_wrongfieldsetscopedtree_path"),
+                ]
+
+        try:
+            warnings = check_path_uniqueness()
+            model_warnings = [w for w in warnings if getattr(w, "obj", None) is WrongFieldSetScopedTree]
+            assert len(model_warnings) == 1
+            assert model_warnings[0].id == "icv_tree.W001"
+            assert "scope" in model_warnings[0].msg
+            assert "path" in model_warnings[0].msg
+        finally:
+            apps.all_models["tree_testapp"].pop("wrongfieldsetscopedtree", None)
+            apps.clear_cache()
+
+    def test_opt_out_model_is_skipped(self):
+        """A model with check_tree_integrity = False is excluded, same as check_all_tree_models."""
+        from tree_testapp.models import OptOutTree
+
+        from icv_tree.checks import check_path_uniqueness
+
+        warnings = check_path_uniqueness()
+        opt_out_warnings = [w for w in warnings if getattr(w, "obj", None) is OptOutTree]
+        assert opt_out_warnings == []
+
+
 @pytest.mark.django_db
 class TestAppConfigValidation:
     """Test that IcvTreeConfig.ready() validates settings correctly."""
