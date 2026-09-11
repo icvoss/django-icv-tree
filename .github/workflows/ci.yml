@@ -115,7 +115,7 @@ jobs:
           ICV_TREE_ENABLE_CTE: "1"
 
       - name: Run the CTE rebuild suite and capture its result
-        run: pytest tests/test_rebuild_cte.py -q -rs | tee cte.log
+        run: pytest tests/test_rebuild_cte.py -q -rs --color=no | tee cte.log
         env:
           DJANGO_SETTINGS_MODULE: settings
           PYTHONPATH: src:tests
@@ -128,7 +128,7 @@ jobs:
 
       - name: Guard against a vacuous pass (zero collected or any skip)
         run: |
-          if ! grep -qE "^[0-9]+ passed" cte.log; then
+          if ! grep -qE "(^|[^0-9])[0-9]+ passed" cte.log; then
             echo "No 'N passed' summary line found in cte.log; the CTE suite did not run to completion." >&2
             exit 1
           fi
