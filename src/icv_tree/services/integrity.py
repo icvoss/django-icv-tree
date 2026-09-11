@@ -7,6 +7,7 @@ and consistency verification.
 
 from __future__ import annotations
 
+import logging
 import re
 import uuid
 from collections import deque
@@ -18,6 +19,8 @@ from django.db import connection, transaction
 
 if TYPE_CHECKING:
     from ..models import TreeNode
+
+logger = logging.getLogger("icv_tree")
 
 
 def _compute_new_path(
@@ -238,9 +241,16 @@ def _rebuild_cte(model: type, scope: Any = None) -> dict:
 
         all_nodes = list(_unfiltered_qs(model, scope_field=scope_field, scope=scope))
         to_update = []
+        orphaned_pks: list = []
         for node in all_nodes:
             computed = pk_to_computed.get(node.pk)
             if computed is None:
+                # parent_id references a row the recursive CTE never
+                # reached (a dangling FK, typically a hard delete that
+                # bypassed cascade). Counted and reported, not repaired:
+                # the reachable rows still rebuild correctly
+                # (icvoss/django-icv-tree#35).
+                orphaned_pks.append(node.pk)
                 continue
             new_order, new_path, new_depth = computed
             if node.path != new_path or node.depth != new_depth or node.order != new_order:
@@ -251,6 +261,18 @@ def _rebuild_cte(model: type, scope: Any = None) -> dict:
                 nodes_updated += 1
             else:
                 nodes_unchanged += 1
+
+        nodes_orphaned = len(orphaned_pks)
+        if orphaned_pks:
+            logger.warning(
+                "rebuild() found rows unreachable from any root",
+                extra={
+                    "model": model._meta.label,
+                    "scope": scope,
+                    "nodes_orphaned": nodes_orphaned,
+                    "orphaned_pks": orphaned_pks[:10],
+                },
+            )
 
         if to_update:
             # Clear paths to PK-based placeholders first to avoid
@@ -266,7 +288,7 @@ def _rebuild_cte(model: type, scope: Any = None) -> dict:
                     ["path", "depth", "order"],
                 )
 
-    result = {"nodes_updated": nodes_updated, "nodes_unchanged": nodes_unchanged}
+    result = {"nodes_updated": nodes_updated, "nodes_unchanged": nodes_unchanged, "nodes_orphaned": nodes_orphaned}
 
     def _emit():  # type: ignore[no-untyped-def]
         tree_rebuilt.send(
@@ -367,10 +389,17 @@ def _rebuild_scoped(  # noqa: C901
     separator: str,
     step_length: int,
     scope_field: str | None,
-) -> tuple[list, int, int]:
+    all_nodes: list,
+) -> tuple[list, int, int, list]:
     """Run BFS rebuild over a set of roots, numbering paths from 0.
 
-    Returns (to_update, nodes_updated, nodes_unchanged).
+    ``all_nodes`` is every loaded row for the target scope (or the whole
+    model when unscoped); any pk in it that the BFS never dequeues has a
+    ``parent_id`` unreachable from any root (a dangling FK, typically a
+    hard delete that bypassed cascade) and is reported as orphaned rather
+    than repaired (icvoss/django-icv-tree#35).
+
+    Returns (to_update, nodes_updated, nodes_unchanged, orphaned_pks).
     """
     nodes_updated = 0
     nodes_unchanged = 0
@@ -425,7 +454,8 @@ def _rebuild_scoped(  # noqa: C901
                 nodes_unchanged += 1
             queue.append(child)
 
-    return to_update, nodes_updated, nodes_unchanged
+    orphaned_pks = [node.pk for node in all_nodes if node.pk not in computed]
+    return to_update, nodes_updated, nodes_unchanged, orphaned_pks
 
 
 def rebuild(model: type, scope: Any = None) -> dict:
@@ -452,6 +482,10 @@ def rebuild(model: type, scope: Any = None) -> dict:
         Dict with keys:
           - nodes_updated: int
           - nodes_unchanged: int
+          - nodes_orphaned: int, rows whose parent_id is unreachable from
+            any root (icvoss/django-icv-tree#35). Never repaired by this
+            call; reachable rows are still rebuilt correctly. A warning is
+            logged through the ``icv_tree`` logger when this is non-zero.
 
     Raises:
         ImproperlyConfigured: If scope is not None but the model does not
@@ -490,14 +524,27 @@ def rebuild(model: type, scope: Any = None) -> dict:
             parent_to_children.setdefault(pid, []).append(node)
 
         roots = parent_to_children.get(None, [])
-        to_update, nodes_updated, nodes_unchanged = _rebuild_scoped(
+        to_update, nodes_updated, nodes_unchanged, orphaned_pks = _rebuild_scoped(
             model,
             roots,
             parent_to_children,
             separator,
             step_length,
             scope_field,
+            all_nodes,
         )
+
+        nodes_orphaned = len(orphaned_pks)
+        if orphaned_pks:
+            logger.warning(
+                "rebuild() found rows unreachable from any root",
+                extra={
+                    "model": model._meta.label,
+                    "scope": scope,
+                    "nodes_orphaned": nodes_orphaned,
+                    "orphaned_pks": orphaned_pks[:10],
+                },
+            )
 
         if to_update:
             # Clear paths to PK-based placeholders first to avoid
@@ -513,7 +560,7 @@ def rebuild(model: type, scope: Any = None) -> dict:
                     ["path", "depth", "order"],
                 )
 
-    result = {"nodes_updated": nodes_updated, "nodes_unchanged": nodes_unchanged}
+    result = {"nodes_updated": nodes_updated, "nodes_unchanged": nodes_unchanged, "nodes_orphaned": nodes_orphaned}
 
     def _emit():  # type: ignore[no-untyped-def]
         from ..signals import tree_rebuilt

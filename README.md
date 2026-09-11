@@ -391,7 +391,7 @@ All settings use the `ICV_TREE_*` prefix and have sensible defaults:
 | `ICV_TREE_MAX_PATH_LENGTH` | `255` | Max `CharField` length. With defaults: 51 levels deep. |
 | `ICV_TREE_ENABLE_CTE` | `False` | Use PostgreSQL recursive CTE for rebuild. No effect on other databases. |
 | `ICV_TREE_REBUILD_BATCH_SIZE` | `1000` | Nodes per `bulk_update` batch during rebuild. |
-| `ICV_TREE_CHECK_ON_SAVE` | `False` | Run path validation on every save. Development only. |
+| `ICV_TREE_CHECK_ON_SAVE` | `False` | On a same-parent save with a hand-edited `path`, `depth` or `order`, raise `TreeStructureError` naming the field and both values. When `False`, the same mismatch is logged once through the `icv_tree` logger instead, and the save proceeds unchanged. Read at call time, so it can be overridden per test. |
 
 **Warning:** Changing `ICV_TREE_PATH_SEPARATOR` or `ICV_TREE_STEP_LENGTH` after
 data exists will invalidate all stored paths. Run `rebuild()` after changing.

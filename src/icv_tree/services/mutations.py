@@ -380,6 +380,17 @@ def move_to(
     if target.path.startswith(node.path + separator):
         raise TreeStructureError(f"Cannot move node '{node.pk}' under its own descendant '{target.pk}'.")
 
+    # Tree-model check: target must resolve to the same base tree model as
+    # node. Two MTI subtypes of one base (e.g. RegularPage/RedirectPage
+    # under Page) share one _tree_model() and are valid; an unrelated
+    # concrete tree model passed as target previously produced no error,
+    # only a silently wrong query result (icvoss/django-icv-tree#28).
+    if target._tree_model() is not tree_model:
+        raise TreeStructureError(
+            f"Cannot move node of type '{node._tree_model()._meta.label}' to a target of type "
+            f"'{target._tree_model()._meta.label}': target and node must resolve to the same tree model."
+        )
+
     # Determine new parent and new order.
     if position in ("first-child", "last-child"):
         new_parent_id = target.pk

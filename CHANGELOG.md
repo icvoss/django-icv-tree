@@ -11,6 +11,33 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Fixed
 
+- **`ICV_TREE_CHECK_ON_SAVE` now validates same-parent saves** (#27).
+  `handle_pre_save()`'s existing-node branch only acted when `parent_id`
+  changed, so a caller that hand-edited `path`, `depth` or `order` on an
+  already-persisted instance without changing `parent`, then called
+  `save()`, had those values written to the database unchanged: no
+  exception, no log line. `ICV_TREE_CHECK_ON_SAVE` is now read at call time
+  and, when true, raises `TreeStructureError` naming the field and both the
+  stored and in-memory values; when false, a mismatch is logged once
+  through the new `icv_tree` logger and the save proceeds unchanged. Raw
+  saves (`loaddata`) skip the check entirely.
+- **`move_to()` now rejects a target from an unrelated tree model** (#28).
+  `move_to()` checked for a self-move and a descendant-move cycle but never
+  checked that `target` resolved to the same `_tree_model()` base as
+  `node`. Passing an unrelated model's instance as `target` previously
+  produced no exception and a silently wrong result; it now raises
+  `TreeStructureError` naming both models. A move between two
+  multi-table-inheritance subtypes of one base still succeeds, since both
+  resolve to the same `_tree_model()`.
+- **`rebuild()` now counts and reports orphaned rows on both paths** (#35).
+  A row whose `parent_id` references a non-existent or otherwise
+  unreachable row (typically a hard delete that bypassed cascade) was
+  silently skipped by both the recursive-CTE path and the pure-Python BFS
+  path, with no write and no record in the returned dict. `rebuild()` now
+  logs one warning through the `icv_tree` logger naming the count and up to
+  the first ten primary keys, and returns a new `nodes_orphaned: int` key
+  alongside `nodes_updated`/`nodes_unchanged`. Reachable rows continue to
+  rebuild correctly; orphaned rows are reported, not repaired or raised on.
 - **`get_descendant_count()` now scopes to `tree_scope_field`** (#32).
   `get_descendant_count()` in `models.py` filtered `path__startswith` with
   no `_scope_filter()` call, unlike `get_descendants()`, which does. On a
