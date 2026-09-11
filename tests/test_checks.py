@@ -182,9 +182,7 @@ class TestAppConfigValidation:
         """A batch size of 1 is the smallest valid value and must not raise."""
         from icv_tree.apps import IcvTreeConfig
 
-        IcvTreeConfig._validate_settings(
-            lambda name, default: 1 if name == "ICV_TREE_REBUILD_BATCH_SIZE" else default
-        )
+        IcvTreeConfig._validate_settings(lambda name, default: 1 if name == "ICV_TREE_REBUILD_BATCH_SIZE" else default)
 
     def test_default_rebuild_batch_size_does_not_raise(self):
         """The default ICV_TREE_REBUILD_BATCH_SIZE (1000) must not raise."""

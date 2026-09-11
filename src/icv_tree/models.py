@@ -501,11 +501,7 @@ class TreeNode(models.Model):
         from .conf import get_setting
 
         separator = get_setting("ICV_TREE_PATH_SEPARATOR", "/")
-        return (
-            self._tree_objects()
-            .filter(path__startswith=self.path + separator, **self._scope_filter())
-            .count()
-        )
+        return self._tree_objects().filter(path__startswith=self.path + separator, **self._scope_filter()).count()
 
     def move_to(
         self,
