@@ -28,6 +28,37 @@ pip install django-icv-tree
 
 ---
 
+## Boundaries
+
+`django-icv-tree` deliberately does not:
+
+- Support nested set or closure table representations. Materialised path is
+  the only tree strategy, by design.
+- Handle polymorphic model inheritance beyond the multi-table-inheritance
+  routing `_tree_model()` needs internally. `django-polymorphic` integration,
+  if wanted, is the consuming project's responsibility.
+- Implement multi-tenancy. `tree_scope_field` lets a consuming project
+  partition one table into independent trees, but the scope value itself, and
+  any tenant isolation around it, is the consuming project's own concern.
+- Track history or versioning of node moves. `node_moved` and `tree_rebuilt`
+  signals exist for a consumer to build an audit trail on, but icv-tree keeps
+  none itself.
+- Ship drag-and-drop JavaScript. `TreeAdmin` provides the `tree_move_node`
+  AJAX endpoint and URL wiring; the consuming project supplies the frontend
+  (SortableJS, jsTree, or similar).
+- Provide REST API endpoints. No DRF viewsets or URL routes beyond the admin
+  move endpoint; wiring tree data into an API layer is the consuming
+  project's job.
+- Integrate with search. No coupling to django-icv-search or any other
+  indexer.
+- Cache anything. Every traversal method is a live queryset; a consuming
+  project applies Django's cache framework itself if it wants one.
+- Authorise anything. `move_to()`, `rebuild()`, and the admin actions carry no
+  permission checks of their own; access control is entirely the consuming
+  project's `ModelAdmin` permissions and application code.
+
+---
+
 ## Quick start
 
 ```python
@@ -221,9 +252,18 @@ result = check_tree_integrity(Category)
 # }
 ```
 
-Django system checks run automatically at startup:
+Two kinds of system check ship with the package. The data-integrity checks
+read the database and are not registered with Django's check framework: run
+them with `manage.py icv_tree_rebuild --check` or call
+`check_all_tree_models()` from your own CI step.
 - `icv_tree.E001`: orphaned nodes (parent references missing row)
 - `icv_tree.E002`: path inconsistencies (depth mismatch, prefix violation, duplicates)
+
+The declaration check reads only model metadata and is registered, so it
+runs on every `manage.py check`, `migrate` and `runserver`:
+- `icv_tree.W001`: concrete model declares no uniqueness constraint on `path`
+  (or on `(tree_scope_field, path)` for a scoped model); a Warning for now,
+  becoming an Error at the next major release
 
 Models can opt out with `check_tree_integrity = False` on the class.
 
