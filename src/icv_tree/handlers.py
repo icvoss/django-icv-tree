@@ -166,14 +166,23 @@ def handle_pre_save(sender, instance, **kwargs) -> None:  # type: ignore[no-unty
                 # There is no natural 'right' target for a root move, so we
                 # rebuild the node's position as a new root appended at the end.
                 from .conf import get_setting
-                from .services.mutations import _compute_new_path, _reorder_siblings_after_removal
+                from .services.mutations import (
+                    _compute_new_path,
+                    _reorder_siblings_after_removal,
+                    _send_node_moved,
+                )
 
                 separator = get_setting("ICV_TREE_PATH_SEPARATOR", "/")
                 step_length = get_setting("ICV_TREE_STEP_LENGTH", 4)
 
                 # Route through the base tree model so MTI subtype siblings
                 # and descendants are seen.
+                tree_model = sender._tree_model()
                 tree_objects = sender._tree_objects()
+
+                # Captured before the parent is reset to None below, for the
+                # node_moved payload (icvoss/django-icv-tree#34).
+                old_parent_instance = instance.parent if instance.parent_id is not None else None
 
                 with __import__("django.db", fromlist=["transaction"]).transaction.atomic():
                     old_parent_id = instance.parent_id
@@ -210,6 +219,13 @@ def handle_pre_save(sender, instance, **kwargs) -> None:  # type: ignore[no-unty
                                 descendants[i : i + batch_size],
                                 ["path", "depth"],
                             )
+
+                # Emit node_moved after commit, same helper and timing as
+                # move_to() (icvoss/django-icv-tree#34). A save-driven move
+                # to root previously performed this move inline with no
+                # signal at all, while a move to a non-None parent already
+                # delegated to move_to(), which already sent it.
+                _send_node_moved(tree_model, tree_objects, instance, old_parent_instance, None, old_path)
 
 
 def handle_post_delete(sender, instance, **kwargs) -> None:  # type: ignore[no-untyped-def]

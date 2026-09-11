@@ -11,6 +11,41 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Fixed
 
+- **`get_descendant_count()` now scopes to `tree_scope_field`** (#32).
+  `get_descendant_count()` in `models.py` filtered `path__startswith` with
+  no `_scope_filter()` call, unlike `get_descendants()`, which does. On a
+  scoped model, a colliding path in another scope inflated the count with
+  that other scope's rows. It now applies the same `_scope_filter()` as
+  `get_descendants()`, so the two methods agree.
+- **`move_to()` now scopes its descendant and sibling collections to
+  `tree_scope_field`** (#33). The descendant collection and both
+  source-side and destination-side sibling collections (including a
+  `parent_id=None` root-level move) in `services/mutations.py` had no
+  scope constraint at all. On a scoped model, a colliding path could pull
+  another scope's descendants into the placeholder-rewrite pass, and a
+  shared root `parent_id` value could shift another scope's root sibling
+  `order` values. All three collections now filter through the node's own
+  `_scope_filter()`, matching the scope discipline the traversal methods
+  already apply; unscoped models are unaffected, since `_scope_filter()`
+  returns an empty filter for them.
+- **`ICV_TREE_REBUILD_BATCH_SIZE` is now validated at startup** (#36).
+  `apps.py`'s `_validate_settings()` validated `ICV_TREE_PATH_SEPARATOR`
+  and `ICV_TREE_STEP_LENGTH` but never read or validated
+  `ICV_TREE_REBUILD_BATCH_SIZE`, even though `rebuild()` and `move_to()`
+  both use it as a `range()` step. A value of `0` raised `ValueError`
+  partway through a batch loop, mid-transaction, after other writes had
+  already run; a negative value produced an empty `range()` silently, so
+  computed changes were never persisted. `ICV_TREE_REBUILD_BATCH_SIZE` is
+  now rejected at startup with `ImproperlyConfigured` unless it is an
+  integer of at least 1, matching the style of the other two settings.
+- **Save-driven move to root now sends `node_moved`** (#34).
+  `handle_pre_save`'s existing-node branch in `handlers.py` delegated a
+  parent change to `move_to()`, which sends `node_moved` after commit, but
+  a save-driven move to root (new parent `None`) instead performed the
+  move inline and never sent the signal. The inline root-move path now
+  sends `node_moved` after commit via the same helper `move_to()` uses,
+  with the same payload shape and timing, so a receiver observing
+  structural moves no longer misses this case.
 - **`PathIndex` migration operation now honours database routers** (#37).
   `database_forwards` and `database_backwards` in `operations.py` used to
   call `schema_editor.execute(sql)` unconditionally, never consulting

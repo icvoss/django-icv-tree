@@ -446,6 +446,36 @@ class TestScopedTraversalIsolation:
         assert a_root.path == b_root.path == "0001"
         assert a_child.get_root() == a_root
 
+    def test_get_descendant_count_never_counts_another_scope(self, two_scopes, scoped_tree_model):
+        """A colliding path prefix in scope B must never inflate scope A's count.
+
+        Regression for icvoss/django-icv-tree#32: get_descendant_count()
+        filtered path__startswith with no _scope_filter(), unlike
+        get_descendants(), so a colliding path in another scope was counted
+        too. Fails on old code (count is 2, not 1).
+        """
+        s1, s2 = two_scopes
+        a_root = scoped_tree_model.objects.create(name="A-root", scope=s1)
+        scoped_tree_model.objects.create(name="A-child", scope=s1, parent=a_root)
+        b_root = scoped_tree_model.objects.create(name="B-root", scope=s2)
+        scoped_tree_model.objects.create(name="B-child", scope=s2, parent=b_root)
+
+        assert a_root.path == b_root.path == "0001"
+
+        assert a_root.get_descendant_count() == 1
+
+    def test_unscoped_model_descendant_count_unaffected(self, tree_nodes, simple_tree_model):
+        """Control: an unscoped model's get_descendant_count() is untouched.
+
+        tree_nodes builds a small hierarchy under one root; this only proves
+        the scope-aware branch (an empty _scope_filter() dict, a no-op) never
+        changes behaviour for a model with no tree_scope_field.
+        """
+        root = simple_tree_model.objects.filter(parent__isnull=True).order_by("path").first()
+        assert root is not None
+        expected = root.get_descendants().count()
+        assert root.get_descendant_count() == expected
+
     def test_unscoped_model_traversal_unaffected(self, tree_nodes, simple_tree_model):
         """Models with no tree_scope_field must query exactly as before.
 
@@ -517,3 +547,80 @@ class TestScopedSiblingReorderAfterDeletion:
 
         b_c1.refresh_from_db()
         assert b_c1.order == 0
+
+
+@pytest.mark.django_db
+class TestScopedMove:
+    """Regression for icvoss/django-icv-tree#33.
+
+    move_to() collects the moved node's descendants and its source/
+    destination sibling sets (including parent_id=None roots) with no
+    scope constraint at all. On a scoped model, a colliding path can pull
+    another scope's descendants into the placeholder-rewrite pass, and a
+    shared parent_id=None root value can shift another scope's root
+    sibling `order` values.
+    """
+
+    def test_move_does_not_rewrite_another_scopes_colliding_descendant(self, two_scopes, scoped_tree_model):
+        """A colliding descendant path in scope B must survive scope A's move untouched.
+
+        Fails on old code: the unscoped descendant collection in move_to()
+        (path__startswith=old_path + separator) sweeps up scope B's
+        colliding child too, so it gets rewritten to the placeholder prefix
+        and never restored to a real path.
+        """
+        s1, s2 = two_scopes
+        a_root = scoped_tree_model.objects.create(name="A-root", scope=s1)
+        a_child = scoped_tree_model.objects.create(name="A-child", scope=s1, parent=a_root)
+        a_dest = scoped_tree_model.objects.create(name="A-dest", scope=s1)
+        b_root = scoped_tree_model.objects.create(name="B-root", scope=s2)
+        b_child = scoped_tree_model.objects.create(name="B-child", scope=s2, parent=b_root)
+
+        # Sanity: the collision this bug depends on is real.
+        assert a_root.path == b_root.path == "0001"
+        assert a_child.path == b_child.path == "0001/0001"
+
+        b_child_pk = b_child.pk
+
+        # Move scope A's root (and its descendant a_child) under a_dest.
+        a_root.move_to(a_dest, "first-child")
+
+        b_child.refresh_from_db()
+        assert b_child.pk == b_child_pk
+        assert b_child.path == "0001/0001"
+        assert b_child.parent_id == b_root.pk
+        assert not b_child.path.startswith("__MOVING_")
+
+    def test_root_level_move_does_not_shift_another_scopes_root_siblings(self, two_scopes, scoped_tree_model):
+        """A root-level move in scope A must never touch scope B's root order.
+
+        Fails on old code: the source/destination sibling collections in
+        move_to() filter parent_id=<id> with no scope constraint, so a
+        root-level move (parent_id=None on both sides) matches every
+        scope's roots, decrementing/incrementing scope B's root `order`
+        values even though scope B was never touched by the move.
+        """
+        s1, s2 = two_scopes
+        a1 = scoped_tree_model.objects.create(name="A-1", scope=s1)
+        a2 = scoped_tree_model.objects.create(name="A-2", scope=s1)
+        a3 = scoped_tree_model.objects.create(name="A-3", scope=s1)
+        b1 = scoped_tree_model.objects.create(name="B-1", scope=s2)
+        b2 = scoped_tree_model.objects.create(name="B-2", scope=s2)
+        b3 = scoped_tree_model.objects.create(name="B-3", scope=s2)
+
+        assert (a1.order, a2.order, a3.order) == (0, 1, 2)
+        assert (b1.order, b2.order, b3.order) == (0, 1, 2)
+
+        # Move scope A's first root to the end of the root sibling list
+        # (still a root-level move: new_parent_id stays None).
+        a1.move_to(a3, "right")
+
+        b1.refresh_from_db()
+        b2.refresh_from_db()
+        b3.refresh_from_db()
+        assert (b1.order, b2.order, b3.order) == (0, 1, 2)
+
+        a2.refresh_from_db()
+        a3.refresh_from_db()
+        a1.refresh_from_db()
+        assert (a2.order, a3.order, a1.order) == (0, 1, 2)

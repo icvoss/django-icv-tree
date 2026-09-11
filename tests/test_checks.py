@@ -145,3 +145,47 @@ class TestAppConfigValidation:
 
         # Should not raise.
         IcvTreeConfig._validate_settings(lambda name, default: default)
+
+    def test_invalid_rebuild_batch_size_zero_raises(self):
+        """A batch size of 0 should raise ImproperlyConfigured.
+
+        Regression for icvoss/django-icv-tree#36: ICV_TREE_REBUILD_BATCH_SIZE
+        was read by move_to()/rebuild() but never validated at startup, so 0
+        instead raised ValueError partway through a batch loop, mid-transaction.
+        """
+        from django.core.exceptions import ImproperlyConfigured
+
+        from icv_tree.apps import IcvTreeConfig
+
+        with pytest.raises(ImproperlyConfigured, match="ICV_TREE_REBUILD_BATCH_SIZE"):
+            IcvTreeConfig._validate_settings(
+                lambda name, default: 0 if name == "ICV_TREE_REBUILD_BATCH_SIZE" else default
+            )
+
+    def test_invalid_rebuild_batch_size_negative_raises(self):
+        """A negative batch size should raise ImproperlyConfigured.
+
+        Regression for icvoss/django-icv-tree#36: a negative value produced
+        an empty range() silently, so every computed row change was never
+        persisted, with no exception at startup or at call time.
+        """
+        from django.core.exceptions import ImproperlyConfigured
+
+        from icv_tree.apps import IcvTreeConfig
+
+        with pytest.raises(ImproperlyConfigured, match="ICV_TREE_REBUILD_BATCH_SIZE"):
+            IcvTreeConfig._validate_settings(
+                lambda name, default: -1 if name == "ICV_TREE_REBUILD_BATCH_SIZE" else default
+            )
+
+    def test_rebuild_batch_size_one_does_not_raise(self):
+        """A batch size of 1 is the smallest valid value and must not raise."""
+        from icv_tree.apps import IcvTreeConfig
+
+        IcvTreeConfig._validate_settings(lambda name, default: 1 if name == "ICV_TREE_REBUILD_BATCH_SIZE" else default)
+
+    def test_default_rebuild_batch_size_does_not_raise(self):
+        """The default ICV_TREE_REBUILD_BATCH_SIZE (1000) must not raise."""
+        from icv_tree.apps import IcvTreeConfig
+
+        IcvTreeConfig._validate_settings(lambda name, default: default)
