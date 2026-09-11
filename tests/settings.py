@@ -20,7 +20,13 @@ DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.sqlite3",
         "NAME": ":memory:",
-    }
+    },
+    # Second alias for PathIndex router-guard regression tests
+    # (icvoss/django-icv-tree#37). Not used by any other test.
+    "other": {
+        "ENGINE": "django.db.backends.sqlite3",
+        "NAME": ":memory:",
+    },
 }
 
 MIGRATION_MODULES = {

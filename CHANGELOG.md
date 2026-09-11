@@ -9,6 +9,26 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Fixed
+
+- **`PathIndex` migration operation now honours database routers** (#37).
+  `database_forwards` and `database_backwards` in `operations.py` used to
+  call `schema_editor.execute(sql)` unconditionally, never consulting
+  `self.allow_migrate_model()`, unlike Django's own schema operations
+  (`AddIndex`, `CreateModel`, and the rest). In a multi-database project
+  with a router that refuses an app on a given alias, `migrate` correctly
+  skipped `CreateModel` for that alias but `PathIndex` still tried to
+  `CREATE INDEX` on the table that was never created, aborting the
+  migration run with `relation "..." does not exist` (or the SQLite/MySQL
+  equivalent). Both methods now resolve the model from the migration state
+  and return early unless
+  `self.allow_migrate_model(schema_editor.connection.alias, model)` is
+  true, matching the pattern used by `AddIndex`. Related: the vendor check
+  used to read the module-level `django.db.connection` (the default
+  alias) rather than `schema_editor.connection`, so a non-default alias on
+  a different backend received the wrong SQL; it now reads
+  `schema_editor.connection.vendor`.
+
 ## [1.2.0] - 2026-09-07
 
 ### Fixed

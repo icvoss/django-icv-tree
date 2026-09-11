@@ -9,7 +9,6 @@ BTree index.
 
 from __future__ import annotations
 
-from django.db import connection
 from django.db.migrations.operations.base import Operation
 
 
@@ -67,10 +66,13 @@ class PathIndex(Operation):
         to_state,
     ) -> None:
         model = to_state.apps.get_model(app_label, self.model_name)
+        if not self.allow_migrate_model(schema_editor.connection.alias, model):
+            return
+
         table_name = model._meta.db_table
         column_name = model._meta.get_field(self.field_name).column
 
-        if connection.vendor == "postgresql":
+        if schema_editor.connection.vendor == "postgresql":
             opclass = "text_pattern_ops"
             sql = f'CREATE INDEX IF NOT EXISTS "{self.index_name}" ON "{table_name}" ("{column_name}" {opclass});'
         else:
@@ -85,6 +87,10 @@ class PathIndex(Operation):
         from_state,
         to_state,
     ) -> None:
+        model = from_state.apps.get_model(app_label, self.model_name)
+        if not self.allow_migrate_model(schema_editor.connection.alias, model):
+            return
+
         sql = f'DROP INDEX IF EXISTS "{self.index_name}";'
         schema_editor.execute(sql)
 
