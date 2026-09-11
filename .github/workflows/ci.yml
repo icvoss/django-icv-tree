@@ -67,3 +67,72 @@ jobs:
         env:
           DJANGO_SETTINGS_MODULE: settings
           PYTHONPATH: src:tests
+
+  test-postgres:
+    name: Test (Python 3.12, Django 6.1, PostgreSQL)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: icv_test
+          POSTGRES_PASSWORD: icv_test_password
+          POSTGRES_DB: tree_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install "Django~=6.1.0"
+          pip install pytest pytest-django pytest-cov pytest-mock factory-boy "psycopg[binary]"
+          pip install -e .
+
+      - name: Run full suite against PostgreSQL
+        run: pytest tests/ -v --tb=short --color=yes
+        env:
+          DJANGO_SETTINGS_MODULE: settings
+          PYTHONPATH: src:tests
+          POSTGRES_HOST: localhost
+          POSTGRES_PORT: "5432"
+          POSTGRES_DB: tree_test
+          POSTGRES_USER: icv_test
+          POSTGRES_PASSWORD: icv_test_password
+          ICV_TREE_ENABLE_CTE: "1"
+
+      - name: Run the CTE rebuild suite and capture its result
+        run: pytest tests/test_rebuild_cte.py -q -rs | tee cte.log
+        env:
+          DJANGO_SETTINGS_MODULE: settings
+          PYTHONPATH: src:tests
+          POSTGRES_HOST: localhost
+          POSTGRES_PORT: "5432"
+          POSTGRES_DB: tree_test
+          POSTGRES_USER: icv_test
+          POSTGRES_PASSWORD: icv_test_password
+          ICV_TREE_ENABLE_CTE: "1"
+
+      - name: Guard against a vacuous pass (zero collected or any skip)
+        run: |
+          if ! grep -qE "^[0-9]+ passed" cte.log; then
+            echo "No 'N passed' summary line found in cte.log; the CTE suite did not run to completion." >&2
+            exit 1
+          fi
+          if [ "$(grep -c SKIPPED cte.log)" -ne 0 ]; then
+            echo "tests/test_rebuild_cte.py reported SKIPPED tests on the Postgres leg; the vendor guard is not lifting as expected." >&2
+            exit 1
+          fi

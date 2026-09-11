@@ -183,54 +183,58 @@ def _rebuild_cte(model: type, scope: Any = None) -> dict:
         # (roots) to that scope. The recursive member only ever joins
         # children of rows already in the CTE, so it never crosses into
         # another scope's subtree, meaning no extra filter is needed there.
-        anchor_where = "t.parent_id IS NULL"
+        # Filters against `numbered` (aliased `n` below), not the base table.
+        anchor_where = "n.parent_id IS NULL"
         sql_params: list = []
         if scope is not None and scope_col is not None:
-            anchor_where += f" AND t.{quoted_scope} = %s"
+            anchor_where += f" AND n.{quoted_scope} = %s"
             sql_params.append(_bind(_scope_fk_value(scope, scope_field)))
 
+        # PostgreSQL forbids a window function in the recursive term of a
+        # recursive CTE ("window functions are not allowed in a recursive
+        # query's recursive term"), so sib_order cannot be computed inline
+        # in the recursive member. Instead, `numbered` computes sib_order
+        # for every row up front (roots partitioned by scope, children
+        # partitioned by parent_id, both via the same root_partition
+        # expression since parent_id alone already separates children into
+        # disjoint groups), and the recursive CTE below walks `numbered`,
+        # doing nothing but string concatenation and depth increment in its
+        # recursive term.
+        scope_select = f", t.{quoted_scope}" if scope_col else ""
+
         raw_sql = f"""
-            WITH RECURSIVE tree AS (
+            WITH RECURSIVE numbered AS (
                 SELECT
                     t.{quoted_pk},
                     t.parent_id,
                     ROW_NUMBER() OVER (
                         {root_partition}
                         ORDER BY t."order"
-                    ) - 1 AS sib_order,
-                    NULL::text AS parent_path,
-                    0 AS computed_depth
+                    ) - 1 AS sib_order{scope_select}
                 FROM {quoted_table} t
+            ),
+            tree AS (
+                SELECT
+                    n.{quoted_pk},
+                    n.parent_id,
+                    n.sib_order,
+                    LPAD((n.sib_order + 1)::text, {step_length}, '0') AS computed_path,
+                    0 AS computed_depth
+                FROM numbered n
                 WHERE {anchor_where}
                 UNION ALL
                 SELECT
                     child.{quoted_pk},
                     child.parent_id,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY child.parent_id
-                        ORDER BY child."order"
-                    ) - 1,
-                    tree.computed_path,
+                    child.sib_order,
+                    tree.computed_path || '{separator}' ||
+                        LPAD((child.sib_order + 1)::text, {step_length}, '0'),
                     tree.computed_depth + 1
-                FROM {quoted_table} child
+                FROM numbered child
                 JOIN tree ON child.parent_id = tree.{quoted_pk}
-            ),
-            tree_with_path AS (
-                SELECT
-                    {quoted_pk},
-                    parent_id,
-                    sib_order,
-                    CASE
-                        WHEN parent_path IS NULL
-                        THEN LPAD((sib_order + 1)::text, {step_length}, '0')
-                        ELSE parent_path || '{separator}' ||
-                             LPAD((sib_order + 1)::text, {step_length}, '0')
-                    END AS computed_path,
-                    computed_depth
-                FROM tree
             )
             SELECT {quoted_pk}, sib_order, computed_path, computed_depth
-            FROM tree_with_path
+            FROM tree
         """  # noqa: S608 (internal query, identifiers from Django model registry)
 
         with connection.cursor() as cursor:
