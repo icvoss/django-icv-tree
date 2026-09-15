@@ -441,7 +441,7 @@ data exists will invalidate all stored paths. Run `rebuild()` after changing.
 ## Requirements
 
 - Python 3.11+
-- Django 5.1+
+- Django 5.2+
 
 Optional: `factory-boy` for `TreeNodeFactory`.
 
