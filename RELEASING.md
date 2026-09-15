@@ -85,7 +85,7 @@ consumer relying on the old behaviour still needs to know.
 
 ## Django pin
 
-The publish workflow's test job pins `Django~=5.1.0`. When you raise the minimum
+The publish workflow's test job pins `Django~=5.2.0`. When you raise the minimum
 Django in `pyproject.toml`, update that pin in the same PR, or the tagged build's
 test job can fail to resolve dependencies and block the publish.
 
