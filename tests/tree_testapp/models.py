@@ -75,7 +75,11 @@ class Page(TreeNode):
 
     name = models.CharField(max_length=100)
 
-    # Child rows live in their own tables; skip the startup integrity check.
+    # Opted out so this family stays out of the check fixtures, which count
+    # warnings across every installed TreeNode subclass. Not because MTI needs
+    # the opt-out: since icvoss/django-icv-tree#50, W001 resolves the model
+    # owning the path column, so an MTI child needs no opt-out and no
+    # constraint of its own (see TestCheckPathUniquenessUnderMTI).
     check_tree_integrity = False
 
     class Meta:

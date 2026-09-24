@@ -19,7 +19,7 @@ cheap enough to run on every ``check`` and ``migrate``.
 E001: Warning, orphaned nodes (parent_id references missing rows)
 E002: Error, path inconsistencies (depth mismatch, prefix violation, duplicate paths)
 W000: Warning, integrity check itself failed to run (e.g. table missing)
-W001: Warning, concrete model declares no uniqueness constraint on path
+W001: Warning, the model owning the path column declares no uniqueness constraint on it
 """
 
 from __future__ import annotations
@@ -136,8 +136,26 @@ def _constrained_field_sets(model) -> list[frozenset[str]]:  # type: ignore[no-u
     return field_sets
 
 
+def _path_owner(model):  # type: ignore[no-untyped-def]
+    """Return the concrete model whose own table holds ``model``'s path column.
+
+    For a model that is not a multi-table-inheritance child, and for a child
+    that redefines ``path`` on its own table, this is ``model`` itself. For an
+    MTI child that inherits ``path`` from a concrete parent, this is that
+    parent: the column lives in the parent's table, so the parent's table is
+    the only one whose uniqueness constraint can guard it (BR-TREE-001, which
+    scopes path uniqueness to "its concrete model's table").
+
+    ``Field.model`` is the authority here rather than ``TreeNode._tree_model()``:
+    the latter returns the topmost concrete TreeNode ancestor, which is the
+    right answer for tree-walking queries but the wrong one for a child that
+    shadows ``path`` with a column of its own (icvoss/django-icv-tree#50).
+    """
+    return model._meta.get_field("path").model
+
+
 def check_path_uniqueness(app_configs=None, **kwargs):  # type: ignore[no-untyped-def]
-    """Warn when a concrete TreeNode subclass declares no uniqueness constraint on path.
+    """Warn when the model owning a TreeNode's path column declares no uniqueness constraint.
 
     The abstract ``path`` field carries ``db_index=True`` only, not
     ``unique=True`` (a plain unique on path in the abstract Meta is wrong for
@@ -149,6 +167,18 @@ def check_path_uniqueness(app_configs=None, **kwargs):  # type: ignore[no-untype
     Without it, two concurrent inserts under the same parent that compute the
     same order (and therefore the same path) are both written successfully,
     silently (icvoss/django-icv-tree#31).
+
+    The constraint is evaluated on the model that OWNS the ``path`` column, not
+    on every concrete subclass (icvoss/django-icv-tree#50). A multi-table
+    inheritance child inherits ``path`` from its concrete parent's table and
+    cannot declare a constraint on a column its own table does not hold, so a
+    child whose parent carries the constraint passes with no declaration of its
+    own, and the missing-constraint warning is reported once against the owning
+    parent rather than once per child. The ``tree_scope_field`` pairing is
+    resolved on that same owner. A child that redefines ``path`` on its own
+    table owns that column and is checked in its own right, as before. A
+    consumer who set ``check_tree_integrity = False`` on MTI children purely to
+    silence this check can remove it.
 
     This is a Warning, not an Error, for this release: icv-media's
     MediaFolder declares no such constraint today, and an Error would block
@@ -166,31 +196,49 @@ def check_path_uniqueness(app_configs=None, **kwargs):  # type: ignore[no-untype
     it is cheap enough to run on every ``check`` and ``migrate``.
     """
     warnings: list = []
+    reported: set = set()
 
     for model in _installed_tree_models():
-        scope_field = getattr(model, "tree_scope_field", None)
+        owner = _path_owner(model)
+
+        # An MTI parent and each of its children resolve to the same owner, so
+        # report the owner once rather than once per subclass.
+        if owner in reported:
+            continue
+
+        scope_field = getattr(owner, "tree_scope_field", None)
         expected = frozenset({scope_field, "path"}) if scope_field else frozenset({"path"})
 
-        if expected in _constrained_field_sets(model):
+        if expected in _constrained_field_sets(owner):
             continue
+
+        reported.add(owner)
 
         expected_repr = ", ".join(sorted(expected))
         constraint_hint = (
-            f'models.UniqueConstraint(fields=["{scope_field}", "path"], name="unique_{model._meta.model_name}_path")'
+            f'models.UniqueConstraint(fields=["{scope_field}", "path"], name="unique_{owner._meta.model_name}_path")'
             if scope_field
-            else f'models.UniqueConstraint(fields=["path"], name="unique_{model._meta.model_name}_path")'
+            else f'models.UniqueConstraint(fields=["path"], name="unique_{owner._meta.model_name}_path")'
+        )
+        inherited_note = (
+            ""
+            if owner is model
+            else (
+                f" {model.__name__} inherits path from {owner.__name__} through multi-table inheritance, "
+                f"so the constraint belongs on {owner.__name__}, whose table holds the column."
+            )
         )
 
         warnings.append(
             Warning(
-                f"{model.__name__} declares no uniqueness constraint covering exactly "
+                f"{owner.__name__} declares no uniqueness constraint covering exactly "
                 f"{{{expected_repr}}} on its path field.",
                 hint=(
-                    f"Add to {model.__name__}.Meta.constraints: {constraint_hint}. "
+                    f"Add to {owner.__name__}.Meta.constraints: {constraint_hint}.{inherited_note} "
                     f"Opt out with check_tree_integrity = False on the model if this is intentional."
                 ),
                 id="icv_tree.W001",
-                obj=model,
+                obj=owner,
             )
         )
 

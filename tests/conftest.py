@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+
 import pytest
 
 
@@ -129,3 +132,47 @@ def tree_nodes(db, make_node):
         "child2": child2,
         "root2": root2,
     }
+
+
+@contextmanager
+def throwaway_models(*models: type) -> Iterator[None]:
+    """Unregister throwaway test-local models and unwire their tree receivers.
+
+    Test-local models registered on the ``tree_testapp`` app_label must be
+    popped out of the app registry on teardown so they do not leak into
+    tests that enumerate installed TreeNode subclasses. Popping alone is not
+    enough for a TreeNode subclass.
+
+    ``icv_tree.handlers`` connects ``handle_pre_save``/``handle_post_delete``
+    per sender on ``class_prepared``, and ``django.dispatch.Signal`` keys a
+    connection by ``id(sender)`` with no weakref on the sender. A popped,
+    garbage-collected throwaway class therefore leaves live receiver entries
+    keyed by a dead address, and CPython reuses addresses: a later model
+    allocated at that address inherits the dead class's listeners, so
+    ``pre_save.has_listeners(SomeUnrelatedModel)`` answers True for a model
+    icv_tree never wired. That is a cross-test leak, not a source defect: it
+    made tests/test_signal_connection.py's
+    test_class_prepared_leaves_a_late_defined_unrelated_model_untouched fail
+    on one CI leg only (PR #51), passing everywhere else, purely on
+    allocation luck.
+
+    Disconnecting each sender before it dies keeps the receiver table free of
+    dead-id entries. Pass the models in the order to unregister them
+    (children before their MTI parent).
+    """
+    from django.apps import apps
+
+    from icv_tree import handlers
+
+    try:
+        yield
+    finally:
+        for model in models:
+            for signal, handler, _name in handlers._TREE_RECEIVERS:
+                signal.disconnect(
+                    handler,
+                    sender=model,
+                    dispatch_uid=f"icv_tree.handlers.{_name}.{model._meta.label}",
+                )
+            apps.all_models[model._meta.app_label].pop(model._meta.model_name, None)
+        apps.clear_cache()

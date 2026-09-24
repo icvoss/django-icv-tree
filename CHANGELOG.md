@@ -9,6 +9,29 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Fixed
+
+- **`icv_tree.W001` no longer misreports multi-table inheritance children**
+  (#50). The check read `Meta.constraints` and `Meta.unique_together` off
+  every concrete `TreeNode` subclass, so an MTI child was warned even when
+  its concrete parent carried exactly the constraint asked for, and the hint
+  told the consumer to add a constraint the child's own table cannot hold
+  (the tree columns live in the parent's table). The constraint sets are now
+  evaluated on the model that owns the `path` column,
+  `model._meta.get_field("path").model`, with the `tree_scope_field` pairing
+  resolved on that same owner. A child whose parent satisfies the check now
+  passes with no declaration of its own; a missing constraint is reported
+  once, against the owning parent, instead of once per subclass; and when the
+  child is reached before its parent the hint names the parent the constraint
+  belongs on. A model that owns its own `path` column is checked exactly as
+  before. Consumers who set `check_tree_integrity = False` on MTI children as
+  a workaround for these warnings can now remove it, which also restores
+  `icv_tree.E001`/`E002` coverage for those models: that attribute suppressed
+  every integrity check, not just this one. Reported from
+  icvoss/icvlocal.com, where five such warnings were tracked as
+  icvoss/icv-cms#158 and were about to be answered by adding redundant
+  constraints to tables that do not hold the column.
+
 ## [1.3.0] - 2026-09-11
 
 ### Added
