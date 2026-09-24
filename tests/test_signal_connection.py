@@ -11,6 +11,7 @@ every queryset .delete() in a consumer project, not just TreeNode deletes.
 from __future__ import annotations
 
 import pytest
+from conftest import throwaway_models
 from django.db.models.deletion import Collector
 from django.db.models.signals import post_delete, pre_save
 
@@ -228,14 +229,9 @@ class TestModelDefinedAfterReadyIsWired:
                 app_label = "tree_testapp"
                 db_table = "tree_testapp_latedefinedtree"
 
-        try:
+        with throwaway_models(LateDefinedTree):
             assert pre_save.has_listeners(LateDefinedTree) is True
             assert post_delete.has_listeners(LateDefinedTree) is True
-        finally:
-            from django.apps import apps
-
-            apps.all_models["tree_testapp"].pop("latedefinedtree", None)
-            apps.clear_cache()
 
     def test_class_prepared_guard_is_a_noop_before_models_ready(self):
         """_connect_handlers_for_new_model() returns early when apps.models_ready
@@ -279,14 +275,9 @@ class TestModelDefinedAfterReadyIsWired:
             def __str__(self) -> str:
                 return self.name
 
-        try:
+        with throwaway_models(LateDefinedUnrelated):
             assert pre_save.has_listeners(LateDefinedUnrelated) is False
             assert post_delete.has_listeners(LateDefinedUnrelated) is False
-        finally:
-            from django.apps import apps
-
-            apps.all_models["tree_testapp"].pop("latedefinedunrelated", None)
-            apps.clear_cache()
 
 
 # ---------------------------------------------------------------------------

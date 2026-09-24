@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from conftest import throwaway_models
 from django.contrib.admin.sites import AdminSite
 from django.contrib.auth.models import User
 from django.core.management import CommandError, call_command
@@ -244,7 +245,6 @@ class TestTreeAdminGetQueryset:
         (``-path``), and this assertion fails because the rows come back in
         descending path order instead of ascending.
         """
-        from django.apps import apps
         from django.contrib import admin
         from tree_testapp.models import SimpleTree
 
@@ -256,7 +256,7 @@ class TestTreeAdminGetQueryset:
                 app_label = "tree_testapp"
                 ordering = ["-path"]
 
-        try:
+        with throwaway_models(ReversePathTree):
 
             class ReversePathTreeAdmin(TreeAdmin, admin.ModelAdmin):
                 pass
@@ -275,9 +275,6 @@ class TestTreeAdminGetQueryset:
 
             expected_ascending = sorted([root.path, child_a.path, child_b.path])
             assert paths == expected_ascending
-        finally:
-            apps.all_models["tree_testapp"].pop("reversepathtree", None)
-            apps.clear_cache()
 
     def test_get_queryset_returns_a_queryset(self, make_node):
         """get_queryset() returns a QuerySet, the base queryset with ordering applied."""

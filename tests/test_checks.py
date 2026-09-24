@@ -9,6 +9,7 @@ via direct invocation.
 from __future__ import annotations
 
 import pytest
+from conftest import throwaway_models
 
 
 @pytest.mark.django_db
@@ -146,7 +147,6 @@ class TestCheckPathUniqueness:
         enumerate installed TreeNode subclasses (e.g. check_all_tree_models,
         _connect_tree_handlers).
         """
-        from django.apps import apps
         from django.db import models
 
         from icv_tree.checks import check_path_uniqueness
@@ -162,13 +162,10 @@ class TestCheckPathUniqueness:
                     models.UniqueConstraint(fields=["path"], name="unique_constrainedunscopedtree_path"),
                 ]
 
-        try:
+        with throwaway_models(ConstrainedUnscopedTree):
             warnings = check_path_uniqueness()
             model_warnings = [w for w in warnings if getattr(w, "obj", None) is ConstrainedUnscopedTree]
             assert model_warnings == []
-        finally:
-            apps.all_models["tree_testapp"].pop("constrainedunscopedtree", None)
-            apps.clear_cache()
 
     def test_scoped_model_with_constraint_on_path_only_still_warns(self):
         """A scoped model whose constraint covers only path (not scope) still warns.
@@ -184,7 +181,6 @@ class TestCheckPathUniqueness:
         because {"path"} would satisfy a containment check even though it is
         missing the scope field.
         """
-        from django.apps import apps
         from django.db import models
 
         from icv_tree.checks import check_path_uniqueness
@@ -207,16 +203,13 @@ class TestCheckPathUniqueness:
                     models.UniqueConstraint(fields=["path"], name="unique_wrongfieldsetscopedtree_path"),
                 ]
 
-        try:
+        with throwaway_models(WrongFieldSetScopedTree):
             warnings = check_path_uniqueness()
             model_warnings = [w for w in warnings if getattr(w, "obj", None) is WrongFieldSetScopedTree]
             assert len(model_warnings) == 1
             assert model_warnings[0].id == "icv_tree.W001"
             assert "scope" in model_warnings[0].msg
             assert "path" in model_warnings[0].msg
-        finally:
-            apps.all_models["tree_testapp"].pop("wrongfieldsetscopedtree", None)
-            apps.clear_cache()
 
     def test_opt_out_model_is_skipped(self):
         """A model with check_tree_integrity = False is excluded, same as check_all_tree_models."""
@@ -254,7 +247,6 @@ class TestCheckPathUniquenessUnderMTI:
         parent passed then and passes now, so asserting on the children alone
         would not distinguish the fix; the assertion covers all three.
         """
-        from django.apps import apps
         from django.db import models
 
         from icv_tree.checks import check_path_uniqueness
@@ -281,7 +273,7 @@ class TestCheckPathUniquenessUnderMTI:
                 db_table = "tree_testapp_constrainedmtichildtwo"
 
         family = (ConstrainedMtiParent, ConstrainedMtiChildOne, ConstrainedMtiChildTwo)
-        try:
+        with throwaway_models(ConstrainedMtiChildOne, ConstrainedMtiChildTwo, ConstrainedMtiParent):
             # The children own no path column of their own: it is the parent's.
             assert ConstrainedMtiChildOne._meta.get_field("path").model is ConstrainedMtiParent
             assert ConstrainedMtiChildTwo._meta.get_field("path").model is ConstrainedMtiParent
@@ -289,11 +281,6 @@ class TestCheckPathUniquenessUnderMTI:
             warnings = check_path_uniqueness()
             family_warnings = [w for w in warnings if getattr(w, "obj", None) in family]
             assert family_warnings == []
-        finally:
-            apps.all_models["tree_testapp"].pop("constrainedmtichildone", None)
-            apps.all_models["tree_testapp"].pop("constrainedmtichildtwo", None)
-            apps.all_models["tree_testapp"].pop("constrainedmtiparent", None)
-            apps.clear_cache()
 
     def test_unconstrained_mti_parent_is_warned_exactly_once(self):
         """A bare MTI parent with two bare children yields one W001, naming the parent.
@@ -305,7 +292,6 @@ class TestCheckPathUniquenessUnderMTI:
         (one per model), and resolving the owner without deduplicating would
         produce three identical ones.
         """
-        from django.apps import apps
         from django.db import models
 
         from icv_tree.checks import check_path_uniqueness
@@ -329,7 +315,7 @@ class TestCheckPathUniquenessUnderMTI:
                 db_table = "tree_testapp_baremtichildtwo"
 
         family = (BareMtiParent, BareMtiChildOne, BareMtiChildTwo)
-        try:
+        with throwaway_models(BareMtiChildOne, BareMtiChildTwo, BareMtiParent):
             warnings = check_path_uniqueness()
             family_warnings = [w for w in warnings if getattr(w, "obj", None) in family]
 
@@ -341,11 +327,6 @@ class TestCheckPathUniquenessUnderMTI:
             assert "BareMtiChildOne" not in warning.msg
             assert "BareMtiChildTwo" not in warning.msg
             assert "BareMtiParent.Meta.constraints" in warning.hint
-        finally:
-            apps.all_models["tree_testapp"].pop("baremtichildone", None)
-            apps.all_models["tree_testapp"].pop("baremtichildtwo", None)
-            apps.all_models["tree_testapp"].pop("baremtiparent", None)
-            apps.clear_cache()
 
     def test_scope_field_is_resolved_on_the_owning_parent(self):
         """The expected field set pairs path with the OWNER's tree_scope_field.
@@ -356,7 +337,6 @@ class TestCheckPathUniquenessUnderMTI:
         satisfying case: a parent declaring exactly that constraint silences the
         whole family.
         """
-        from django.apps import apps
         from django.db import models
 
         from icv_tree.checks import check_path_uniqueness
@@ -385,14 +365,10 @@ class TestCheckPathUniquenessUnderMTI:
                 db_table = "tree_testapp_scopedmtichild"
 
         family = (ScopedMtiParent, ScopedMtiChild)
-        try:
+        with throwaway_models(ScopedMtiChild, ScopedMtiParent):
             warnings = check_path_uniqueness()
             family_warnings = [w for w in warnings if getattr(w, "obj", None) in family]
             assert family_warnings == []
-        finally:
-            apps.all_models["tree_testapp"].pop("scopedmtichild", None)
-            apps.all_models["tree_testapp"].pop("scopedmtiparent", None)
-            apps.clear_cache()
 
     def test_non_mti_model_owning_its_path_is_still_checked_on_itself(self):
         """A model that inherits path only from abstract TreeNode owns the column.
@@ -404,7 +380,6 @@ class TestCheckPathUniquenessUnderMTI:
         (``FieldError: Local field 'path' ... clashes``), so this, not a
         shadowed column, is the shape in which a subclass owns its own path.
         """
-        from django.apps import apps
         from django.db import models
 
         from icv_tree.checks import check_path_uniqueness
@@ -417,7 +392,7 @@ class TestCheckPathUniquenessUnderMTI:
                 app_label = "tree_testapp"
                 db_table = "tree_testapp_owntablepathtree"
 
-        try:
+        with throwaway_models(OwnTablePathTree):
             assert OwnTablePathTree._meta.get_field("path").model is OwnTablePathTree
 
             warnings = check_path_uniqueness()
@@ -429,9 +404,6 @@ class TestCheckPathUniquenessUnderMTI:
             assert "OwnTablePathTree.Meta.constraints" in model_warnings[0].hint
             # No inheritance note: the model under check IS the owner.
             assert "multi-table inheritance" not in model_warnings[0].hint
-        finally:
-            apps.all_models["tree_testapp"].pop("owntablepathtree", None)
-            apps.clear_cache()
 
     def test_hint_names_the_owner_when_a_child_is_visited_first(self, monkeypatch):
         """When the child is reached before its parent, the hint names the parent.
@@ -444,7 +416,6 @@ class TestCheckPathUniquenessUnderMTI:
         infer it. Discovery order is forced here rather than left to registration
         order, so the assertion cannot pass vacuously.
         """
-        from django.apps import apps
         from django.db import models
 
         from icv_tree import checks
@@ -462,7 +433,7 @@ class TestCheckPathUniquenessUnderMTI:
                 app_label = "tree_testapp"
                 db_table = "tree_testapp_orderedmtichild"
 
-        try:
+        with throwaway_models(OrderedMtiChild, OrderedMtiParent):
             monkeypatch.setattr(
                 checks,
                 "_installed_tree_models",
@@ -477,10 +448,6 @@ class TestCheckPathUniquenessUnderMTI:
             assert "OrderedMtiParent.Meta.constraints" in warning.hint
             assert "OrderedMtiChild inherits path from OrderedMtiParent" in warning.hint
             assert "multi-table inheritance" in warning.hint
-        finally:
-            apps.all_models["tree_testapp"].pop("orderedmtichild", None)
-            apps.all_models["tree_testapp"].pop("orderedmtiparent", None)
-            apps.clear_cache()
 
 
 @pytest.mark.django_db
