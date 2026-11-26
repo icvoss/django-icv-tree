@@ -9,6 +9,29 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [1.3.2] - 2026-11-26
+
+### Added
+
+- **`icv_tree.E003` logging-handler boot check** (ADR-101 decision 3,
+  `docs/STANDARDS.md` section 15, umbrella icvoss/icv-oss-umbrella#678).
+  `manage.py check`, `check --deploy`, `runserver` and `migrate` fail with an
+  Error when no logging handler is reachable from the `icv_tree` logger (a handler on the
+  logger itself, or on an ancestor while `propagate` stays true;
+  `logging.lastResort` does not count). Without one, the failures this
+  package logs (integrity and path-uniqueness warnings, and tree signal-handler warnings) are invisible. It is an Error, not a Warning, as
+  ADR-101 and STANDARDS require.
+
+### On upgrade
+
+- **Behaviour change: `manage.py check` and `check --deploy` now error.** A
+  project whose `LOGGING` configures no handler for `icv_tree` or the root logger
+  will see `icv_tree.E003`, and the commands that run system checks
+  (`check`, `runserver`, `migrate`, `makemigrations`) stop until it is fixed.
+  Add a handler for `icv_tree` (or the root logger) in `LOGGING`, e.g.
+  `LOGGING["loggers"]["icv_tree"] = {"handlers": [...], "level": "WARNING",
+  "propagate": True}`, or list `icv_tree.E003` in `SILENCED_SYSTEM_CHECKS`.
+
 ## [1.3.1] - 2026-09-24
 
 ### Fixed

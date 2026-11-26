@@ -94,3 +94,19 @@ ICV_TREE_MAX_PATH_LENGTH = 255
 ICV_TREE_ENABLE_CTE = os.environ.get("ICV_TREE_ENABLE_CTE") == "1"
 ICV_TREE_REBUILD_BATCH_SIZE = 1000
 ICV_TREE_CHECK_ON_SAVE = False
+
+
+# ADR-101 decision 3: the logging-handler boot check (icv_tree.E003) is an
+# Error, so every settings module that runs system checks (makemigrations,
+# migrate, check) must route the package logger to a handler. Propagation
+# stays on so caplog and the root logger still see the records, and the root
+# handler covers any sibling ICV package installed alongside this one.
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "handlers": {"null": {"class": "logging.NullHandler"}},
+    "loggers": {
+        "icv_tree": {"handlers": ["null"], "level": "WARNING", "propagate": True},
+    },
+    "root": {"handlers": ["null"]},
+}

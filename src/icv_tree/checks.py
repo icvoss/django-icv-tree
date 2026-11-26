@@ -24,8 +24,10 @@ W001: Warning, the model owning the path column declares no uniqueness constrain
 
 from __future__ import annotations
 
+import logging
+
 from django.apps import apps
-from django.core.checks import Error, Warning
+from django.core.checks import Error, Warning, register
 
 
 def _installed_tree_models() -> list:  # type: ignore[type-arg]
@@ -243,3 +245,60 @@ def check_path_uniqueness(app_configs=None, **kwargs):  # type: ignore[no-untype
         )
 
     return warnings
+
+
+E003_ID = "icv_tree.E003"
+_PACKAGE_LOGGER_NAME = "icv_tree"
+
+
+def _has_reachable_handler(logger_name: str) -> bool:
+    """Return whether a handler is attached anywhere in ``logger_name``'s
+    hierarchy that a record from it would actually reach, walking ancestors
+    while ``propagate`` is true. ``logging.lastResort`` (the module-level
+    fallback that stderr-prints WARNING+ when nothing else is configured) is
+    not a configured handler and is ignored, per ADR-101 decision 3: it
+    exists precisely to be invisible/unmanaged, not a substitute for a real
+    handler the consumer chose.
+    """
+    logger = logging.getLogger(logger_name)
+
+    current: logging.Logger | None = logger
+    while current is not None:
+        if any(handler is not logging.lastResort for handler in current.handlers):
+            return True
+        if not current.propagate:
+            return False
+        current = current.parent
+
+    return False
+
+
+@register()
+def check_logging_handler_configured(app_configs, **kwargs):  # type: ignore[no-untyped-def]
+    """Fail with an Error when no handler reaches the icv_tree logger hierarchy (icv_tree.E003).
+
+    ADR-101 decision 3 and docs/STANDARDS.md section 15: a package that
+    emits through logging ships a boot-time check confirming the
+    consumer's LOGGING configuration actually routes it somewhere, and
+    it fails as an Error, not a Warning. The failures this package logs
+    (integrity and path-uniqueness warnings, and tree signal-handler
+    warnings) rely on this.
+    """
+    if _has_reachable_handler(_PACKAGE_LOGGER_NAME):
+        return []
+
+    logger_names = f"'{_PACKAGE_LOGGER_NAME}'"
+    return [
+        Error(
+            "No logging handler is configured to receive records from the "
+            f"{logger_names} logger (or any of its ancestors while "
+            "propagate=True), so failures icv-tree logs will be invisible.",
+            hint=(
+                "Add a handler for the 'icv_tree' logger (or the root logger, "
+                "if it propagates) in your LOGGING setting, e.g. "
+                "LOGGING['loggers']['icv_tree'] = {'handlers': [...], "
+                "'level': 'WARNING', 'propagate': True}."
+            ),
+            id=E003_ID,
+        )
+    ]
